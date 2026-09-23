@@ -1,0 +1,28 @@
+# Project ID is filled after the designated disposable Project is created.
+schema_version: 1
+repository: kevinmartin/sofa-disposable
+repository_id: R_kgDOUmB_jw
+project_id: PVT_kwHOAAfL7c4Bke1I
+owner_id: MDQ6VXNlcjUxMDk1Nw==
+ready_status: Ready
+allowed_paths:
+  - fixture/greeting.go
+profile:
+  agent: copilot
+  secret_env: SOFA_MODEL_TOKEN
+limits:
+  attempt_seconds: 600
+  repair_attempts: 0
+  infra_retries: 1
+  max_agent_turns: 1
+  max_files: 10
+  max_file_bytes: 131072
+  max_total_bytes: 524288
+checks:
+  - id: go-test
+    argv: [go, test, ./...]
+    timeout_seconds: 120
+recipe:
+  kind: gofmt
+  paths:
+    - fixture/greeting.go
