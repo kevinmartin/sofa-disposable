@@ -24,7 +24,7 @@ jobs:
       actions: read
     uses: kevinmartin/sofa/.github/workflows/reconcile.yml@b398279a8efe557b8fabb5cb76d94a1c329849eb
     with:
-      issue_number: ${{ inputs.issue_number }}
+      issue_number: ${{ fromJSON(inputs.issue_number) }}
       toolkit_sha: b398279a8efe557b8fabb5cb76d94a1c329849eb
     secrets:
       SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
