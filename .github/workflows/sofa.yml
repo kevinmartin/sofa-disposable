@@ -1,0 +1,46 @@
+# Copy to .github/workflows/sofa.yml in the designated disposable repository.
+# Replace every 000... commit with the same published, reviewed sofa commit.
+name: sofa disposable canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Approved issue number in this repository
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: sofa-${{ github.repository }}-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.event.repository.fork == false && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/reconcile.yml@6ac1653cd7ee9fd6ab1de128fcff415907daf5f5
+    with:
+      issue_number: ${{ inputs.issue_number }}
+      toolkit_sha: 6ac1653cd7ee9fd6ab1de128fcff415907daf5f5
+    secrets:
+      SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
+
+  work:
+    needs: reconcile
+    if: needs.reconcile.outputs.dispatch == 'true'
+    permissions:
+      contents: write
+      pull-requests: write
+      copilot-requests: write
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/work.yml@6ac1653cd7ee9fd6ab1de128fcff415907daf5f5
+    with:
+      toolkit_sha: 6ac1653cd7ee9fd6ab1de128fcff415907daf5f5
+      reconcile_publication: ${{ needs.reconcile.outputs.reconcile_publication == 'true' }}
+      reconcile_candidate: ${{ needs.reconcile.outputs.reconcile_candidate == 'true' }}
+    secrets:
+      SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
