@@ -21,11 +21,11 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: kevinmartin/sofa
-          ref: 49c75c18bcef944f1692cc58ec8a6066b26ea024
+          ref: 86ed4b89482c28a49f99582a4fe689e69a976fe0
           persist-credentials: false
           path: toolkit
       - name: Verify trusted diagnostic commit
-        run: test "$(git -C toolkit rev-parse HEAD)" = 49c75c18bcef944f1692cc58ec8a6066b26ea024
+        run: test "$(git -C toolkit rev-parse HEAD)" = 86ed4b89482c28a49f99582a4fe689e69a976fe0
       - name: Fetch checked Copilot ACP runtime
         shell: bash
         run: |
@@ -36,22 +36,33 @@ jobs:
           echo 'ea4a519d7b2ff54e9c7d10ae9921cf4ab3f5041489ec340852f47f4f63fc535b  '"$RUNNER_TEMP/copilot-linux-x64.tar.gz" | sha256sum --check --status
           tar -xzf "$RUNNER_TEMP/copilot-linux-x64.tar.gz" -C "$RUNNER_TEMP/copilot-bin"
           test -x "$RUNNER_TEMP/copilot-bin/copilot"
-      - name: Run zero-prompt isolated ACP probe
+      - name: Compare zero-prompt ACP startup variants
         shell: bash
         env:
           SOFA_MODEL_TOKEN: ${{ github.token }}
         run: |
-          docker run --rm --platform linux/amd64 \
-            --user "$(id -u):$(id -g)" \
-            --cap-drop ALL --security-opt no-new-privileges --read-only \
-            --pids-limit 128 --memory 3g --cpus 2 \
-            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
-            --tmpfs /home/sofa:rw,nosuid,nodev,size=64m \
-            --mount "type=bind,src=$PWD/consumer,dst=/workspace" \
-            --mount "type=bind,src=$PWD/toolkit/scripts,dst=/probe,readonly" \
-            --mount "type=bind,src=$RUNNER_TEMP/copilot-bin,dst=/copilot,readonly" \
-            --env SOFA_MODEL_TOKEN \
-            --env HOME=/home/sofa \
-            --env PATH=/toolkit:/copilot:/usr/local/bin:/usr/bin:/bin \
-            node:24-bookworm@sha256:b977d0f785d96029d8d4c0790b6bf1c2a4c72e0f26319808e7ba2e9d966a1ac3 \
-            node /probe/acp-preflight.mjs
+          set +e
+          for variant in baseline roomy_tmp node_user; do
+            user_arg="$(id -u):$(id -g)"
+            tmp_size=256m
+            case "$variant" in
+              roomy_tmp) tmp_size=512m ;;
+              node_user) user_arg=node ;;
+            esac
+            echo "sofa ACP preflight variant: $variant"
+            docker run --rm --platform linux/amd64 \
+              --user "$user_arg" \
+              --cap-drop ALL --security-opt no-new-privileges --read-only \
+              --pids-limit 128 --memory 3g --cpus 2 \
+              --tmpfs "/tmp:rw,nosuid,nodev,size=$tmp_size" \
+              --tmpfs /home/sofa:rw,nosuid,nodev,size=64m \
+              --mount "type=bind,src=$PWD/consumer,dst=/workspace" \
+              --mount "type=bind,src=$PWD/toolkit/scripts,dst=/probe,readonly" \
+              --mount "type=bind,src=$RUNNER_TEMP/copilot-bin,dst=/copilot,readonly" \
+              --env SOFA_MODEL_TOKEN \
+              --env HOME=/home/sofa \
+              --env PATH=/toolkit:/copilot:/usr/local/bin:/usr/bin:/bin \
+              node:24-bookworm@sha256:b977d0f785d96029d8d4c0790b6bf1c2a4c72e0f26319808e7ba2e9d966a1ac3 \
+              node /probe/acp-preflight.mjs
+            echo "sofa ACP preflight variant exit: $variant $?"
+          done
