@@ -1,0 +1,1 @@
+{"title":"Format the greeting fixture with the exact recipe","body":"Apply the repository-configured gofmt recipe to `fixture/greeting.go`. Preserve greeting behavior and leave tests, workflows, and configuration unchanged. The only expected candidate change is formatter output for that existing file.\n\n\u003c!-- sofa:recipe=gofmt --\u003e"}
