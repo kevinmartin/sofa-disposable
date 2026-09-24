@@ -1,0 +1,1 @@
+{"title":"One-retry publication recovery canary","body":"Apply the configured `gofmt` recipe to the existing `fixture/greeting.go` file. Preserve all greeting behavior, tests, workflows, and configuration. The expected candidate contains only formatter output for this one file.\n\n\u003c!-- sofa:recipe=gofmt --\u003e"}
