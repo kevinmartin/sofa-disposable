@@ -31,9 +31,9 @@ jobs:
         with:
           go-version-file: toolkit/go.mod
           cache: false
-      - name: Exercise candidate, symlink, hook, evidence, and credential guards
+      - name: Exercise candidate, process cleanup, evidence, and credential guards
         working-directory: toolkit
-        run: go test -count=1 ./internal/integrity ./internal/github ./cmd/sofa
+        run: go test -count=1 ./internal/integrity ./internal/github ./internal/agent ./internal/state ./cmd/sofa
       - name: Build the trusted worker mount
         working-directory: toolkit
         env:
