@@ -56,6 +56,7 @@ jobs:
       - name: Discover exact sofa PR revisions and dispatch owned test branches
         env:
           GH_TOKEN: ${{ github.token }}
+          SOFA_DISPOSABLE_WORKFLOW_TOKEN: ${{ secrets.SOFA_DISPOSABLE_WORKFLOW_TOKEN }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}
           SOFA_GATE_HEAD: ${{ inputs.candidate_sha }}
           SOFA_GATE_BASE: ${{ inputs.base_sha }}

@@ -30,8 +30,9 @@ const (
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type api struct {
-	http  *http.Client
-	token string
+	http          *http.Client
+	token         string
+	workflowToken string
 }
 
 type pull struct {
@@ -83,7 +84,7 @@ type apiError struct{ status int }
 
 func (e apiError) Error() string { return fmt.Sprintf("GitHub API returned HTTP %d", e.status) }
 
-func (a api) request(ctx context.Context, method, path string, input, output any) error {
+func (a api) request(ctx context.Context, method, path, token string, input, output any) error {
 	if !strings.HasPrefix(path, "/repos/") || strings.ContainsAny(path, "\r\n#") {
 		return errors.New("invalid API path")
 	}
@@ -99,7 +100,7 @@ func (a api) request(ctx context.Context, method, path string, input, output any
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+a.token)
+	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -120,11 +121,18 @@ func (a api) request(ctx context.Context, method, path string, input, output any
 }
 
 func (a api) get(ctx context.Context, path string, output any) error {
-	return a.request(ctx, http.MethodGet, path, nil, output)
+	return a.request(ctx, http.MethodGet, path, a.token, nil, output)
 }
 
 func (a api) post(ctx context.Context, path string, input, output any) error {
-	return a.request(ctx, http.MethodPost, path, input, output)
+	return a.request(ctx, http.MethodPost, path, a.token, input, output)
+}
+
+func (a api) postWorkflow(ctx context.Context, path string, input, output any) error {
+	if a.workflowToken == "" {
+		return errors.New("disposable workflow-authoring credential unavailable")
+	}
+	return a.request(ctx, http.MethodPost, path, a.workflowToken, input, output)
 }
 
 func suiteID(p pull) string {
@@ -237,21 +245,25 @@ func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
 	var tree struct {
 		SHA string `json:"sha"`
 	}
-	if err := a.post(ctx, "/repos/"+disposableRepo+"/git/trees", map[string]any{
+	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/trees", map[string]any{
 		"base_tree": base.Tree.SHA,
 		"tree":      []map[string]any{{"path": workflowPath, "mode": "100644", "type": "blob", "content": want}},
-	}, &tree); err != nil || !shaPattern.MatchString(tree.SHA) {
-		return "", errors.New("cannot create suite workflow tree")
+	}, &tree); err != nil {
+		return "", fmt.Errorf("cannot create suite workflow tree: %w", err)
+	} else if !shaPattern.MatchString(tree.SHA) {
+		return "", errors.New("invalid suite workflow tree")
 	}
 	var made commit
-	if err := a.post(ctx, "/repos/"+disposableRepo+"/git/commits", map[string]any{
+	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/commits", map[string]any{
 		"message": "Test sofa PR at exact candidate and base revisions",
 		"tree":    tree.SHA,
 		"parents": []string{mainRef.Object.SHA},
-	}, &made); err != nil || !shaPattern.MatchString(made.SHA) {
-		return "", errors.New("cannot create suite workflow commit")
+	}, &made); err != nil {
+		return "", fmt.Errorf("cannot create suite workflow commit: %w", err)
+	} else if !shaPattern.MatchString(made.SHA) {
+		return "", errors.New("invalid suite workflow commit")
 	}
-	if err := a.post(ctx, "/repos/"+disposableRepo+"/git/refs", map[string]any{"ref": "refs/heads/" + name, "sha": made.SHA}, nil); err != nil {
+	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/refs", map[string]any{"ref": "refs/heads/" + name, "sha": made.SHA}, nil); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -343,7 +355,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "trusted coordinator identity unavailable")
 		os.Exit(1)
 	}
-	a := api{token: token, http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+	a := api{token: token, workflowToken: os.Getenv("SOFA_DISPOSABLE_WORKFLOW_TOKEN"), http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return errors.New("redirect refused")
 	}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
