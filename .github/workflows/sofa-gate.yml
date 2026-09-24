@@ -1,64 +1,23 @@
-# Trusted coordinator lives on the disposable default branch. It checks only
-# PR metadata and creates unprivileged, suite-owned test workflow branches.
-name: sofa hosted E2E coordinator
-
+name: sofa hosted E2E candidate
 on:
   workflow_dispatch:
     inputs:
-      sofa_pr:
-        description: Sofa PR number; empty means discover all open PRs
-        type: string
-        required: false
-      candidate_sha:
-        description: Expected sofa PR head SHA
-        type: string
-        required: false
-      base_sha:
-        description: Expected sofa PR base SHA
-        type: string
-        required: false
-      source_run_id:
-        description: Metadata-only sofa event bridge run ID
-        type: string
-        required: false
-      source_run_attempt:
-        description: Metadata-only sofa event bridge attempt
-        type: string
-        required: false
-  schedule:
-    - cron: '17,47 * * * *'
-
+      sofa_pr: {type: string, required: false}
+      candidate_sha: {type: string, required: false}
+      base_sha: {type: string, required: false}
+      source_run_id: {type: string, required: false}
+      source_run_attempt: {type: string, required: false}
 permissions: {}
-
-concurrency:
-  group: sofa-gate-coordinator
-  cancel-in-progress: false
-
 jobs:
-  coordinate:
-    if: github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main' && github.event.repository.fork == false
-    environment: sofa-gate-coordinator
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  candidate:
     permissions:
-      contents: write
-      actions: write
-    steps:
-      - name: Check out trusted disposable coordinator
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Discover exact sofa PR revisions and dispatch owned test branches
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOFA_GATE_PR: ${{ inputs.sofa_pr }}
-          SOFA_GATE_HEAD: ${{ inputs.candidate_sha }}
-          SOFA_GATE_BASE: ${{ inputs.base_sha }}
-          SOFA_GATE_SOURCE_RUN: ${{ inputs.source_run_id }}
-          SOFA_GATE_SOURCE_ATTEMPT: ${{ inputs.source_run_attempt }}
-        run: go run ./cmd/sofa-gate
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@187d7da423e2758d20191cd19b78facb75564d82
+    with:
+      suite_id: p2-f31b2e61e9a5d7e1d605aeaa
+      scenario: edit
+      candidate_sha: 187d7da423e2758d20191cd19b78facb75564d82
+      base_sha: bc5623fa9128e58efb391e1cdd6ce69f339bb9e5
+      disposable_base_sha: e3b5ec89c55861444da3db993294f83bf1d8d0d3
+      reconcile_candidate: false
