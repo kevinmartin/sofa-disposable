@@ -57,6 +57,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOFA_DISPOSABLE_WORKFLOW_TOKEN: ${{ secrets.SOFA_DISPOSABLE_WORKFLOW_TOKEN }}
+          SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
+          SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}
           SOFA_GATE_HEAD: ${{ inputs.candidate_sha }}
           SOFA_GATE_BASE: ${{ inputs.base_sha }}

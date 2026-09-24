@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
 
 const (
@@ -283,6 +285,21 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	current, err := a.currentPR(ctx, p.Number)
 	if err != nil || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
 		return errors.New("sofa PR changed before dispatch")
+	}
+	appID, appKey := os.Getenv("SOFA_GATE_APP_ID"), os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")
+	if (appID == "") != (appKey == "") {
+		return errors.New("incomplete sofa gate App credential")
+	}
+	if appID != "" {
+		writer := gatestatus.Writer{Client: a.http, AppID: appID, PrivateKeyPEM: appKey}
+		if err := writer.Publish(ctx, gatestatus.Result{
+			PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
+			State:       gatestatus.Pending,
+			RunURL:      fmt.Sprintf("https://github.com/%s/actions/runs/%s", disposableRepo, os.Getenv("GITHUB_RUN_ID")),
+			Description: "Hosted fake ACP E2E queued for exact revision",
+		}); err != nil {
+			return fmt.Errorf("mark exact sofa revision pending: %w", err)
+		}
 	}
 	err = a.post(ctx, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", map[string]any{
 		"ref":    branch,
