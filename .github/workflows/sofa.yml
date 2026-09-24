@@ -22,10 +22,10 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: kevinmartin/sofa/.github/workflows/reconcile.yml@a1284ee0821b2a73d994f1536d1dfca0f69731ad
+    uses: kevinmartin/sofa/.github/workflows/reconcile.yml@02cb9f83c2a6f0068dd3a7c1910f6c78cd0ebaaf
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
-      toolkit_sha: a1284ee0821b2a73d994f1536d1dfca0f69731ad
+      toolkit_sha: 02cb9f83c2a6f0068dd3a7c1910f6c78cd0ebaaf
     secrets:
       SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
 
@@ -36,9 +36,9 @@ jobs:
       contents: write
       copilot-requests: write
       actions: read
-    uses: kevinmartin/sofa/.github/workflows/work.yml@a1284ee0821b2a73d994f1536d1dfca0f69731ad
+    uses: kevinmartin/sofa/.github/workflows/work.yml@02cb9f83c2a6f0068dd3a7c1910f6c78cd0ebaaf
     with:
-      toolkit_sha: a1284ee0821b2a73d994f1536d1dfca0f69731ad
+      toolkit_sha: 02cb9f83c2a6f0068dd3a7c1910f6c78cd0ebaaf
       reconcile_publication: ${{ needs.reconcile.outputs.reconcile_publication == 'true' }}
       reconcile_candidate: ${{ needs.reconcile.outputs.reconcile_candidate == 'true' }}
     secrets:
