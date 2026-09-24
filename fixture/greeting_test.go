@@ -9,6 +9,7 @@ func TestGreeting(t *testing.T) {
 	}{
 		{"Ada", "Hello, Ada"},
 		{"  Ada  ", "Hello, Ada"},
+		{"Ada   Lovelace", "Hello, Ada Lovelace"},
 		{" ", "Hello, friend"},
 	}
 	for _, tt := range tests {
