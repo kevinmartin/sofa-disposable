@@ -1,0 +1,1 @@
+{"title":"Branch guard canary: format the greeting fixture","body":"Apply the configured `gofmt` recipe to `fixture/greeting.go` as a bounded one-file formatting change. Keep greeting behavior, tests, workflows, and configuration unchanged. This issue exercises refusal to overwrite a separately changed candidate branch.\n\n\u003c!-- sofa:recipe=gofmt --\u003e"}
