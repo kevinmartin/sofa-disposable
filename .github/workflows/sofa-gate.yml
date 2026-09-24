@@ -20,4 +20,6 @@ jobs:
       candidate_sha: 187d7da423e2758d20191cd19b78facb75564d82
       base_sha: bc5623fa9128e58efb391e1cdd6ce69f339bb9e5
       disposable_base_sha: e3b5ec89c55861444da3db993294f83bf1d8d0d3
-      reconcile_candidate: false
+      reconcile_candidate: true
+      producer_run_id: '36063701681'
+      producer_run_attempt: '1'
