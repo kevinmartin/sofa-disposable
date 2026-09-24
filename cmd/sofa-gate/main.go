@@ -135,8 +135,8 @@ func (a api) postWorkflow(ctx context.Context, path string, input, output any) e
 	return a.request(ctx, http.MethodPost, path, a.workflowToken, input, output)
 }
 
-func suiteID(p pull) string {
-	digest := sha256.Sum256([]byte(p.Head.SHA + ":" + p.Base.SHA))
+func suiteID(p pull, consumerBase string) string {
+	digest := sha256.Sum256([]byte(p.Head.SHA + ":" + p.Base.SHA + ":" + consumerBase))
 	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
 }
 
@@ -166,7 +166,7 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
-`, p.Head.SHA, suiteID(p), p.Head.SHA, p.Base.SHA, consumerBase)
+`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
 }
 
 func (a api) checkCandidate(ctx context.Context, p pull) (bool, error) {
@@ -215,11 +215,11 @@ func (a api) branch(ctx context.Context, name string) (ref, bool, error) {
 }
 
 func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
-	name := "sofa-e2e/" + suiteID(p)
 	mainRef, ok, err := a.branch(ctx, "main")
 	if err != nil || !ok || !shaPattern.MatchString(mainRef.Object.SHA) {
 		return "", errors.New("disposable main identity unavailable")
 	}
+	name := "sofa-e2e/" + suiteID(p, mainRef.Object.SHA)
 	want := branchWorkflow(p, mainRef.Object.SHA)
 	if existing, exists, err := a.branch(ctx, name); err != nil {
 		return "", err
@@ -264,7 +264,7 @@ func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
 		return "", errors.New("invalid suite workflow commit")
 	}
 	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/refs", map[string]any{"ref": "refs/heads/" + name, "sha": made.SHA}, nil); err != nil {
-		return "", err
+		return "", fmt.Errorf("cannot create suite workflow ref: %w", err)
 	}
 	return name, nil
 }
@@ -276,7 +276,7 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 		return err
 	}
 	if runs.TotalCount > 0 {
-		fmt.Printf("suite %s already has %d hosted run(s)\n", suiteID(p), runs.TotalCount)
+		fmt.Printf("suite %s already has %d hosted run(s)\n", strings.TrimPrefix(branch, "sofa-e2e/"), runs.TotalCount)
 		return nil
 	}
 	// Re-read after branch creation; changed base/head cannot dispatch the old suite.
@@ -289,7 +289,7 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 		"inputs": map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA},
 	}, nil)
 	if err == nil {
-		fmt.Printf("dispatched suite %s on %s\n", suiteID(p), branch)
+		fmt.Printf("dispatched suite %s on %s\n", strings.TrimPrefix(branch, "sofa-e2e/"), branch)
 	}
 	return err
 }
