@@ -1,0 +1,1 @@
+Inert human update for the sofa branch-guard canary.
