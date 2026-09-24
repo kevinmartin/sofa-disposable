@@ -21,11 +21,11 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: kevinmartin/sofa
-          ref: 86ed4b89482c28a49f99582a4fe689e69a976fe0
+          ref: 514206f3fa78d669fa1bbe20a0659d7801bfa4a8
           persist-credentials: false
           path: toolkit
       - name: Verify trusted diagnostic commit
-        run: test "$(git -C toolkit rev-parse HEAD)" = 86ed4b89482c28a49f99582a4fe689e69a976fe0
+        run: test "$(git -C toolkit rev-parse HEAD)" = 514206f3fa78d669fa1bbe20a0659d7801bfa4a8
       - name: Fetch checked Copilot ACP runtime
         shell: bash
         run: |
@@ -36,18 +36,27 @@ jobs:
           echo 'ea4a519d7b2ff54e9c7d10ae9921cf4ab3f5041489ec340852f47f4f63fc535b  '"$RUNNER_TEMP/copilot-linux-x64.tar.gz" | sha256sum --check --status
           tar -xzf "$RUNNER_TEMP/copilot-linux-x64.tar.gz" -C "$RUNNER_TEMP/copilot-bin"
           test -x "$RUNNER_TEMP/copilot-bin/copilot"
+          mkdir -p "$RUNNER_TEMP/copilot-package"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$RUNNER_TEMP/github-copilot-linux-x64.tgz" \
+            https://github.com/github/copilot-cli/releases/download/v1.0.86/github-copilot-1.0.86-linux-x64.tgz
+          echo '53284019748ac198c3dbcf9ba17f0541c8fcaaee16e6c644eb0e7285cdfd6112  '"$RUNNER_TEMP/github-copilot-linux-x64.tgz" | sha256sum --check --status
+          tar -xzf "$RUNNER_TEMP/github-copilot-linux-x64.tgz" -C "$RUNNER_TEMP/copilot-package"
+          test -f "$RUNNER_TEMP/copilot-package/package/index.js"
       - name: Compare zero-prompt ACP startup variants
         shell: bash
         env:
           SOFA_MODEL_TOKEN: ${{ github.token }}
         run: |
           set +e
-          for variant in baseline roomy_tmp node_user; do
+          for variant in baseline roomy_tmp node_user package_entry; do
             user_arg="$(id -u):$(id -g)"
             tmp_size=256m
+            package_entry=
             case "$variant" in
               roomy_tmp) tmp_size=512m ;;
               node_user) user_arg=node ;;
+              package_entry) package_entry=/copilot-package/package/index.js ;;
             esac
             echo "sofa ACP preflight variant: $variant"
             docker run --rm --platform linux/amd64 \
@@ -59,7 +68,9 @@ jobs:
               --mount "type=bind,src=$PWD/consumer,dst=/workspace" \
               --mount "type=bind,src=$PWD/toolkit/scripts,dst=/probe,readonly" \
               --mount "type=bind,src=$RUNNER_TEMP/copilot-bin,dst=/copilot,readonly" \
+              --mount "type=bind,src=$RUNNER_TEMP/copilot-package,dst=/copilot-package,readonly" \
               --env SOFA_MODEL_TOKEN \
+              --env SOFA_COPILOT_ENTRY="$package_entry" \
               --env HOME=/home/sofa \
               --env PATH=/toolkit:/copilot:/usr/local/bin:/usr/bin:/bin \
               node:24-bookworm@sha256:b977d0f785d96029d8d4c0790b6bf1c2a4c72e0f26319808e7ba2e9d966a1ac3 \
