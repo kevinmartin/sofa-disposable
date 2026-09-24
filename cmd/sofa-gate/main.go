@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
 
 const (
@@ -30,8 +32,9 @@ const (
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type api struct {
-	http  *http.Client
-	token string
+	http          *http.Client
+	token         string
+	workflowToken string
 }
 
 type pull struct {
@@ -83,7 +86,7 @@ type apiError struct{ status int }
 
 func (e apiError) Error() string { return fmt.Sprintf("GitHub API returned HTTP %d", e.status) }
 
-func (a api) request(ctx context.Context, method, path string, input, output any) error {
+func (a api) request(ctx context.Context, method, path, token string, input, output any) error {
 	if !strings.HasPrefix(path, "/repos/") || strings.ContainsAny(path, "\r\n#") {
 		return errors.New("invalid API path")
 	}
@@ -99,7 +102,7 @@ func (a api) request(ctx context.Context, method, path string, input, output any
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+a.token)
+	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -120,15 +123,22 @@ func (a api) request(ctx context.Context, method, path string, input, output any
 }
 
 func (a api) get(ctx context.Context, path string, output any) error {
-	return a.request(ctx, http.MethodGet, path, nil, output)
+	return a.request(ctx, http.MethodGet, path, a.token, nil, output)
 }
 
 func (a api) post(ctx context.Context, path string, input, output any) error {
-	return a.request(ctx, http.MethodPost, path, input, output)
+	return a.request(ctx, http.MethodPost, path, a.token, input, output)
 }
 
-func suiteID(p pull) string {
-	digest := sha256.Sum256([]byte(p.Head.SHA + ":" + p.Base.SHA))
+func (a api) postWorkflow(ctx context.Context, path string, input, output any) error {
+	if a.workflowToken == "" {
+		return errors.New("disposable workflow-authoring credential unavailable")
+	}
+	return a.request(ctx, http.MethodPost, path, a.workflowToken, input, output)
+}
+
+func suiteID(p pull, consumerBase string) string {
+	digest := sha256.Sum256([]byte(p.Head.SHA + ":" + p.Base.SHA + ":" + consumerBase))
 	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
 }
 
@@ -158,7 +168,7 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
-`, p.Head.SHA, suiteID(p), p.Head.SHA, p.Base.SHA, consumerBase)
+`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
 }
 
 func (a api) checkCandidate(ctx context.Context, p pull) (bool, error) {
@@ -207,11 +217,11 @@ func (a api) branch(ctx context.Context, name string) (ref, bool, error) {
 }
 
 func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
-	name := "sofa-e2e/" + suiteID(p)
 	mainRef, ok, err := a.branch(ctx, "main")
 	if err != nil || !ok || !shaPattern.MatchString(mainRef.Object.SHA) {
 		return "", errors.New("disposable main identity unavailable")
 	}
+	name := "sofa-e2e/" + suiteID(p, mainRef.Object.SHA)
 	want := branchWorkflow(p, mainRef.Object.SHA)
 	if existing, exists, err := a.branch(ctx, name); err != nil {
 		return "", err
@@ -237,22 +247,26 @@ func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
 	var tree struct {
 		SHA string `json:"sha"`
 	}
-	if err := a.post(ctx, "/repos/"+disposableRepo+"/git/trees", map[string]any{
+	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/trees", map[string]any{
 		"base_tree": base.Tree.SHA,
 		"tree":      []map[string]any{{"path": workflowPath, "mode": "100644", "type": "blob", "content": want}},
-	}, &tree); err != nil || !shaPattern.MatchString(tree.SHA) {
-		return "", errors.New("cannot create suite workflow tree")
+	}, &tree); err != nil {
+		return "", fmt.Errorf("cannot create suite workflow tree: %w", err)
+	} else if !shaPattern.MatchString(tree.SHA) {
+		return "", errors.New("invalid suite workflow tree")
 	}
 	var made commit
-	if err := a.post(ctx, "/repos/"+disposableRepo+"/git/commits", map[string]any{
+	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/commits", map[string]any{
 		"message": "Test sofa PR at exact candidate and base revisions",
 		"tree":    tree.SHA,
 		"parents": []string{mainRef.Object.SHA},
-	}, &made); err != nil || !shaPattern.MatchString(made.SHA) {
-		return "", errors.New("cannot create suite workflow commit")
+	}, &made); err != nil {
+		return "", fmt.Errorf("cannot create suite workflow commit: %w", err)
+	} else if !shaPattern.MatchString(made.SHA) {
+		return "", errors.New("invalid suite workflow commit")
 	}
-	if err := a.post(ctx, "/repos/"+disposableRepo+"/git/refs", map[string]any{"ref": "refs/heads/" + name, "sha": made.SHA}, nil); err != nil {
-		return "", err
+	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/refs", map[string]any{"ref": "refs/heads/" + name, "sha": made.SHA}, nil); err != nil {
+		return "", fmt.Errorf("cannot create suite workflow ref: %w", err)
 	}
 	return name, nil
 }
@@ -264,7 +278,7 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 		return err
 	}
 	if runs.TotalCount > 0 {
-		fmt.Printf("suite %s already has %d hosted run(s)\n", suiteID(p), runs.TotalCount)
+		fmt.Printf("suite %s already has %d hosted run(s)\n", strings.TrimPrefix(branch, "sofa-e2e/"), runs.TotalCount)
 		return nil
 	}
 	// Re-read after branch creation; changed base/head cannot dispatch the old suite.
@@ -272,12 +286,27 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	if err != nil || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
 		return errors.New("sofa PR changed before dispatch")
 	}
+	appID, appKey := os.Getenv("SOFA_GATE_APP_ID"), os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")
+	if (appID == "") != (appKey == "") {
+		return errors.New("incomplete sofa gate App credential")
+	}
+	if appID != "" {
+		writer := gatestatus.Writer{Client: a.http, AppID: appID, PrivateKeyPEM: appKey}
+		if err := writer.Publish(ctx, gatestatus.Result{
+			PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
+			State:       gatestatus.Pending,
+			RunURL:      fmt.Sprintf("https://github.com/%s/actions/runs/%s", disposableRepo, os.Getenv("GITHUB_RUN_ID")),
+			Description: "Hosted fake ACP E2E queued for exact revision",
+		}); err != nil {
+			return fmt.Errorf("mark exact sofa revision pending: %w", err)
+		}
+	}
 	err = a.post(ctx, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", map[string]any{
 		"ref":    branch,
 		"inputs": map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA},
 	}, nil)
 	if err == nil {
-		fmt.Printf("dispatched suite %s on %s\n", suiteID(p), branch)
+		fmt.Printf("dispatched suite %s on %s\n", strings.TrimPrefix(branch, "sofa-e2e/"), branch)
 	}
 	return err
 }
@@ -343,7 +372,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "trusted coordinator identity unavailable")
 		os.Exit(1)
 	}
-	a := api{token: token, http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+	a := api{token: token, workflowToken: os.Getenv("SOFA_DISPOSABLE_WORKFLOW_TOKEN"), http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return errors.New("redirect refused")
 	}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
