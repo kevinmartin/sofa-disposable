@@ -8,5 +8,5 @@ func Greeting(name string) string {
 	if name == "" {
 		return "Hello, friend"
 	}
-	return "Hello, " + name
+	return "Hello, " + strings.Join(strings.Fields(name), " ")
 }
