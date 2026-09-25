@@ -188,6 +188,31 @@ func TestUnpackZIPRequiresExactBoundedEntries(t *testing.T) {
 	}
 }
 
+func TestDenialZIPUsesHostedSingleFileLayout(t *testing.T) {
+	makeZIP := func(name string) []byte {
+		var buf bytes.Buffer
+		w := zip.NewWriter(&buf)
+		f, err := w.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte(`{"schema_version":1}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	want := map[string]bool{"denial.json": true}
+	if files, err := unpackZIPExpected(makeZIP("denial.json"), want); err != nil || len(files) != 1 {
+		t.Fatalf("hosted single-file denial rejected: %v", err)
+	}
+	if _, err := unpackZIPExpected(makeZIP("report/denial.json"), want); err == nil {
+		t.Fatal("accepted a denial archive with an unexpected path")
+	}
+}
+
 func expectedJobs() jobList {
 	want := []struct{ name, conclusion string }{
 		{"candidate / execute", "success"}, {"candidate / verify", "success"}, {"candidate / publish", "success"}, {"candidate / assert-denied", "skipped"},
