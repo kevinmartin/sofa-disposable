@@ -115,6 +115,106 @@ func TestPublishUsesSofaOnlyStatusTokenAndCurrentRevision(t *testing.T) {
 	}
 }
 
+func TestDispatchTokenUsesDisposableOnlyActionsScope(t *testing.T) {
+	var calls []string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls = append(calls, req.Method+" "+req.URL.Path)
+		if req.URL.Host != "api.github.com" || !strings.HasPrefix(req.Header.Get("Authorization"), "Bearer eyJ") {
+			t.Fatal("dispatch request did not use GitHub API and signed App JWT")
+		}
+		switch req.URL.Path {
+		case "/repos/kevinmartin/sofa-disposable/installation":
+			if req.Method != http.MethodGet {
+				t.Fatal("unexpected installation lookup")
+			}
+			return response(200, `{"id":42}`), nil
+		case "/app/installations/42/access_tokens":
+			if req.Method != http.MethodPost || req.Header.Get("Content-Type") != "application/json" {
+				t.Fatal("unexpected token mint request")
+			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const want = `{"repositories":["sofa-disposable"],"permissions":{"actions":"write","metadata":"read"}}`
+			if string(body) != want {
+				t.Fatalf("dispatch token scope widened: %s", body)
+			}
+			return response(201, `{"token":"scoped-dispatch-token"}`), nil
+		default:
+			t.Fatalf("unexpected API path %q", req.URL.Path)
+			return nil, nil
+		}
+	})}
+	w := Writer{Client: client, AppID: "123", PrivateKeyPEM: appKey(t), Now: func() time.Time { return time.Unix(1_700_000_000, 0) }}
+	token, err := w.DispatchToken(context.Background())
+	if err != nil || token != "scoped-dispatch-token" {
+		t.Fatalf("dispatch token = %q, err = %v", token, err)
+	}
+	if len(calls) != 2 || calls[0] != "GET /repos/kevinmartin/sofa-disposable/installation" || calls[1] != "POST /app/installations/42/access_tokens" {
+		t.Fatalf("unexpected dispatch calls: %v", calls)
+	}
+}
+
+func TestDispatchTokenFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		installationCode int
+		installationBody string
+		mintCode         int
+		mintBody         string
+		wantCalls        int
+	}{
+		{"installation unavailable", 404, `{}`, 201, `{"token":"valid"}`, 1},
+		{"missing installation ID", 200, `{}`, 201, `{"token":"valid"}`, 1},
+		{"negative installation ID", 200, `{"id":-1}`, 201, `{"token":"valid"}`, 1},
+		{"mint unavailable", 200, `{"id":42}`, 403, `{}`, 2},
+		{"missing token", 200, `{"id":42}`, 201, `{}`, 2},
+		{"invalid token", 200, `{"id":42}`, 201, `{"token":"invalid\nheader"}`, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				switch req.URL.Path {
+				case "/repos/kevinmartin/sofa-disposable/installation":
+					return response(tc.installationCode, tc.installationBody), nil
+				case "/app/installations/42/access_tokens":
+					return response(tc.mintCode, tc.mintBody), nil
+				default:
+					t.Fatalf("unexpected request %s", req.URL.Path)
+					return nil, nil
+				}
+			})}
+			w := Writer{Client: client, AppID: "123", PrivateKeyPEM: appKey(t)}
+			if token, err := w.DispatchToken(context.Background()); err == nil || token != "" || calls != tc.wantCalls {
+				t.Fatalf("failed open: token=%q, err=%v, calls=%d", token, err, calls)
+			}
+		})
+	}
+}
+
+func TestDispatchTokenWithoutAppCredentialsMakesNoRequest(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return response(200, `{}`), nil
+	})}
+	for _, w := range []Writer{
+		{Client: client},
+		{Client: client, AppID: "123"},
+		{Client: client, PrivateKeyPEM: appKey(t)},
+		{Client: client, AppID: "not-an-ID", PrivateKeyPEM: appKey(t)},
+	} {
+		if token, err := w.DispatchToken(context.Background()); err == nil || token != "" {
+			t.Fatalf("accepted invalid App credentials: token=%q err=%v", token, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("made %d API calls without valid App credentials", calls)
+	}
+}
+
 func TestPublishRejectsStaleOrForeignPRWithoutStatus(t *testing.T) {
 	cases := []struct {
 		name     string

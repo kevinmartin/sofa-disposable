@@ -43,6 +43,7 @@ type api struct {
 type gateStatus interface {
 	Latest(context.Context, string) (gatestatus.Snapshot, error)
 	Publish(context.Context, gatestatus.Result) error
+	DispatchToken(context.Context) (string, error)
 }
 
 func (a api) statusWriter() gateStatus {
@@ -418,9 +419,14 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	}); err != nil {
 		return fmt.Errorf("mark exact sofa revision pending: %w", err)
 	}
-	// A dispatch created with GITHUB_TOKEN does not emit a workflow_run wakeup.
-	// Use the scoped workflow credential that also authored this candidate ref.
-	err = a.postWorkflow(ctx, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", map[string]any{
+	// A GITHUB_TOKEN dispatch did not emit a workflow_run wakeup, and the
+	// workflow-authoring token lacks Actions permission. Mint a short-lived
+	// App token limited to disposable Actions dispatch instead.
+	dispatchToken, err := a.statusWriter().DispatchToken(ctx)
+	if err != nil {
+		return fmt.Errorf("disposable App dispatch credential unavailable: %w", err)
+	}
+	err = a.request(ctx, http.MethodPost, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", dispatchToken, map[string]any{
 		"ref":    branch,
 		"inputs": map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA},
 	}, nil)
