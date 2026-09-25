@@ -175,14 +175,15 @@ func (c client) content(ctx context.Context, path, ref string) ([]byte, error) {
 }
 
 type workflowRun struct {
-	ID         int64  `json:"id"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	Event      string `json:"event"`
-	Path       string `json:"path"`
-	HeadBranch string `json:"head_branch"`
-	HeadSHA    string `json:"head_sha"`
-	RunAttempt int    `json:"run_attempt"`
+	ID         int64     `json:"id"`
+	Status     string    `json:"status"`
+	Conclusion string    `json:"conclusion"`
+	Event      string    `json:"event"`
+	Path       string    `json:"path"`
+	HeadBranch string    `json:"head_branch"`
+	HeadSHA    string    `json:"head_sha"`
+	RunAttempt int       `json:"run_attempt"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type runList struct {
@@ -222,26 +223,32 @@ func (c client) completedRun(ctx context.Context, branch, branchSHA string) (wor
 	if list.TotalCount > 100 {
 		return workflowRun{}, false, errors.New("suite has unbounded hosted run history")
 	}
+	if list.TotalCount < 0 || len(list.Runs) != list.TotalCount {
+		return workflowRun{}, false, errors.New("suite hosted run listing invalid")
+	}
+	var newest workflowRun
 	for _, r := range list.Runs {
-		if r.HeadBranch != branch || r.HeadSHA != branchSHA || r.Event != "workflow_dispatch" || r.RunAttempt != 1 || r.Path != workflowPath {
+		if r.HeadBranch != branch || r.HeadSHA != branchSHA || r.Event != "workflow_dispatch" || r.Path != workflowPath {
 			continue
 		}
-		if r.Status != "completed" {
-			return workflowRun{}, false, nil
+		if r.ID < 1 || r.CreatedAt.IsZero() || r.RunAttempt < 1 {
+			return workflowRun{}, false, errors.New("suite hosted run identity invalid")
 		}
-		if r.Conclusion != "success" {
-			return workflowRun{}, false, nil
+		if newest.ID == 0 || r.CreatedAt.After(newest.CreatedAt) || (r.CreatedAt.Equal(newest.CreatedAt) && r.ID > newest.ID) {
+			newest = r
 		}
-		var jobs jobList
-		if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", consumerRepo, r.ID), &jobs); err != nil {
-			return workflowRun{}, false, err
-		}
-		if !validJobs(jobs) {
-			return workflowRun{}, false, errors.New("hosted run lacks successful execute/verify/publish jobs")
-		}
-		return r, true, nil
 	}
-	return workflowRun{}, false, nil
+	if newest.ID == 0 || newest.RunAttempt != 1 || newest.Status != "completed" || newest.Conclusion != "success" {
+		return workflowRun{}, false, nil
+	}
+	var jobs jobList
+	if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", consumerRepo, newest.ID), &jobs); err != nil {
+		return workflowRun{}, false, err
+	}
+	if !validJobs(jobs) {
+		return workflowRun{}, false, errors.New("hosted run lacks successful execute/verify/publish jobs")
+	}
+	return newest, true, nil
 }
 
 func validJobs(j jobList) bool {
