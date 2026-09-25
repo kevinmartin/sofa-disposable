@@ -709,7 +709,7 @@ type draftPR struct {
 
 func (c client) findDraft(ctx context.Context, branch, headSHA string) (draftPR, bool, error) {
 	var prs []draftPR
-	path := "/repos/" + consumerRepo + "/pulls?state=all&head=" + url.QueryEscape(consumerRepo+":"+branch) + "&base=main&per_page=100"
+	path := "/repos/" + consumerRepo + "/pulls?state=all&head=" + url.QueryEscape("kevinmartin:"+branch) + "&base=main&per_page=100"
 	if err := c.get(ctx, path, &prs); err != nil {
 		return draftPR{}, false, err
 	}

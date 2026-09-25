@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -77,6 +78,36 @@ func TestEnsureBranchUsesScopedCredentialForEveryGitWrite(t *testing.T) {
 	branch, err := a.ensureBranch(context.Background(), p)
 	if err != nil || branch != "sofa-e2e/"+suiteID(p, base) || len(writes) != 3 || !strings.HasSuffix(writes[0], "/git/trees") || !strings.HasSuffix(writes[1], "/git/commits") || !strings.HasSuffix(writes[2], "/git/refs") {
 		t.Fatalf("unexpected suite writes: branch=%q writes=%v err=%v", branch, writes, err)
+	}
+}
+
+func TestHostedDispatchRetriesStayWithinOriginalBudget(t *testing.T) {
+	branch := "sofa-e2e/p2-test"
+	now := time.Date(2026, 9, 25, 1, 0, 0, 0, time.UTC)
+	if dispatch, err := shouldDispatch(runList{}, branch, now); err != nil || !dispatch {
+		t.Fatalf("new exact suite did not dispatch: %v", err)
+	}
+	base := workflowRun{ID: 1, HeadBranch: branch, Status: "completed", Conclusion: "failure", CreatedAt: now.Add(-10 * time.Minute)}
+	for _, tc := range []struct {
+		name     string
+		list     runList
+		dispatch bool
+		err      bool
+	}{
+		{"failed retry", runList{1, []workflowRun{base}}, true, false},
+		{"active", runList{1, []workflowRun{{ID: 1, HeadBranch: branch, Status: "in_progress", CreatedAt: base.CreatedAt}}}, false, false},
+		{"passed", runList{1, []workflowRun{{ID: 1, HeadBranch: branch, Status: "completed", Conclusion: "success", CreatedAt: base.CreatedAt}}}, false, false},
+		{"expired", runList{1, []workflowRun{{ID: 1, HeadBranch: branch, Status: "completed", Conclusion: "failure", CreatedAt: now.Add(-46 * time.Minute)}}}, false, true},
+		{"wrong branch", runList{1, []workflowRun{{ID: 1, HeadBranch: "other", Status: "completed", Conclusion: "failure", CreatedAt: base.CreatedAt}}}, false, true},
+		{"truncated", runList{2, []workflowRun{base}}, false, true},
+		{"run cap", runList{9, []workflowRun{base}}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dispatch, err := shouldDispatch(tc.list, branch, now)
+			if dispatch != tc.dispatch || (err != nil) != tc.err {
+				t.Fatalf("dispatch=%v err=%v, want dispatch=%v error=%v", dispatch, err, tc.dispatch, tc.err)
+			}
+		})
 	}
 }
 
