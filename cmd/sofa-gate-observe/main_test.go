@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -163,6 +164,62 @@ func TestValidJobsRequiresAllThreeCurrentJobs(t *testing.T) {
 	j.Jobs[1].Conclusion = "skipped"
 	if validJobs(j) {
 		t.Fatal("skipped verify accepted")
+	}
+}
+
+func TestCompletedRunSelectsNewestExactSuiteBeforeCheckingOutcome(t *testing.T) {
+	branch := "sofa-e2e/p2-test"
+	sha := strings.Repeat("a", 40)
+	start := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	older := workflowRun{ID: 41, Status: "completed", Conclusion: "success", Event: "workflow_dispatch", Path: workflowPath, HeadBranch: branch, HeadSHA: sha, RunAttempt: 1, CreatedAt: start}
+	newer := older
+	newer.ID = 42
+	newer.CreatedAt = start.Add(time.Minute)
+	for _, tc := range []struct {
+		name  string
+		runs  []workflowRun
+		ready bool
+		id    int64
+	}{
+		{"newer failure after older success", []workflowRun{older, func() workflowRun { r := newer; r.Conclusion = "failure"; return r }()}, false, 0},
+		{"newer cancellation before older success", []workflowRun{func() workflowRun { r := newer; r.Conclusion = "cancelled"; return r }(), older}, false, 0},
+		{"newer active run after older success", []workflowRun{older, func() workflowRun { r := newer; r.Status = "in_progress"; r.Conclusion = ""; return r }()}, false, 0},
+		{"newer rerun after older success", []workflowRun{older, func() workflowRun { r := newer; r.RunAttempt = 2; return r }()}, false, 0},
+		{"newer success after older success", []workflowRun{older, newer}, true, newer.ID},
+		{"same timestamp chooses higher ID", []workflowRun{older, func() workflowRun { r := newer; r.CreatedAt = start; return r }()}, true, newer.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			listed, err := json.Marshal(runList{TotalCount: len(tc.runs), Runs: tc.runs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				var body []byte
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/actions/workflows/sofa-gate.yml/runs"):
+					body = listed
+				case strings.HasSuffix(r.URL.Path, fmt.Sprintf("/actions/runs/%d/jobs", tc.id)) && tc.ready:
+					body = []byte(`{"total_count":3,"jobs":[{"name":"candidate / execute","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / verify","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / publish","status":"completed","conclusion":"success","run_attempt":1}]}`)
+				default:
+					t.Errorf("unexpected request %s", r.URL.String())
+					return nil, fmt.Errorf("unexpected request")
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header), Request: r}, nil
+			})}}
+			got, ready, err := c.completedRun(context.Background(), branch, sha)
+			if err != nil || ready != tc.ready || (ready && got.ID != tc.id) {
+				t.Fatalf("completedRun = (%+v, %t, %v), want ready=%t id=%d", got, ready, err, tc.ready, tc.id)
+			}
+			wantCalls := 1
+			if tc.ready {
+				wantCalls = 2
+			}
+			if calls != wantCalls {
+				t.Fatalf("unexpected request count: got %d, want %d", calls, wantCalls)
+			}
+		})
 	}
 }
 
