@@ -1,0 +1,29 @@
+# Separate default-branch listener for candidate completion. This workflow
+# reads only event metadata and calls the trusted coordinator at this ref.
+name: sofa hosted E2E completion wakeup
+
+on:
+  workflow_run:
+    workflows: ['sofa hosted E2E coordinator', 'sofa hosted E2E candidate']
+    types: [completed]
+    branches: ['sofa-e2e/**']
+
+permissions: {}
+
+jobs:
+  wake:
+    if: >-
+      github.repository == 'kevinmartin/sofa-disposable' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.fork == false &&
+      github.event.workflow_run.name == 'sofa hosted E2E candidate' &&
+      github.event.workflow_run.head_repository.full_name == 'kevinmartin/sofa-disposable' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.path == '.github/workflows/sofa-gate.yml' &&
+      startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    uses: ./.github/workflows/sofa-gate.yml
+    secrets: inherit

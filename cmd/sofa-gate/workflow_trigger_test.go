@@ -9,8 +9,9 @@ import (
 	"testing"
 )
 
-func completionWakeContract(data []byte) error {
+func completionWakeContract(data, wakeup []byte) error {
 	text := string(data)
+	wake := string(wakeup)
 	onStart := strings.Index(text, "\non:\n")
 	jobsStart := strings.Index(text, "\njobs:\n")
 	if onStart < 0 || jobsStart < onStart {
@@ -18,16 +19,41 @@ func completionWakeContract(data []byte) error {
 	}
 	triggers := text[onStart:jobsStart]
 	for _, required := range []string{
+		"  workflow_call:\n",
 		"  workflow_dispatch:\n",
 		"  schedule:\n",
+	} {
+		if !strings.Contains(triggers, required) {
+			return fmt.Errorf("trusted coordinator missing %q", required)
+		}
+	}
+	if strings.Contains(triggers, "  workflow_run:\n") {
+		return fmt.Errorf("completion event must use a separate workflow")
+	}
+	for _, required := range []string{
+		"name: sofa hosted E2E completion wakeup",
 		"  workflow_run:\n",
 		"    workflows: ['sofa hosted E2E coordinator', 'sofa hosted E2E candidate']",
 		"    types: [completed]",
 		"    branches: ['sofa-e2e/**']",
+		"github.repository == 'kevinmartin/sofa-disposable'",
+		"github.ref == 'refs/heads/main'",
+		"github.event.repository.fork == false",
+		"github.event.workflow_run.name == 'sofa hosted E2E candidate'",
+		"github.event.workflow_run.head_repository.full_name == 'kevinmartin/sofa-disposable'",
+		"github.event.workflow_run.event == 'workflow_dispatch'",
+		"github.event.workflow_run.path == '.github/workflows/sofa-gate.yml'",
+		"startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')",
+		"uses: ./.github/workflows/sofa-gate.yml",
+		"secrets: inherit",
+		"actions: write",
 	} {
-		if !strings.Contains(triggers, required) {
+		if !strings.Contains(wake, required) {
 			return fmt.Errorf("trusted completion wake missing %q", required)
 		}
+	}
+	if strings.Contains(wake, "actions/checkout@") || strings.Contains(wake, "\n      run:") || strings.Contains(wake, "ref: ${{ github.event.workflow_run") {
+		return fmt.Errorf("completion wake executes untrusted candidate data")
 	}
 	coordinate := strings.Index(text, "\n  coordinate:\n")
 	observe := strings.Index(text, "\n  observe:\n")
@@ -78,7 +104,11 @@ func TestCompletionWakeUsesTrustedDefaultBranchOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := completionWakeContract(data); err != nil {
+	wakeup, err := os.ReadFile("../../.github/workflows/sofa-gate-wakeup.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := completionWakeContract(data, wakeup); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ name, old, replacement string }{
@@ -88,11 +118,11 @@ func TestCompletionWakeUsesTrustedDefaultBranchOnly(t *testing.T) {
 		{"trusted ref", "github.ref == 'refs/heads/main'", "github.ref == 'refs/heads/other'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mutated := strings.ReplaceAll(string(data), tc.old, tc.replacement)
-			if mutated == string(data) {
+			mutated := strings.ReplaceAll(string(wakeup), tc.old, tc.replacement)
+			if mutated == string(wakeup) {
 				t.Fatal("mutation did not alter workflow")
 			}
-			if err := completionWakeContract([]byte(mutated)); err == nil {
+			if err := completionWakeContract(data, []byte(mutated)); err == nil {
 				t.Fatal("unsafe trigger mutation passed")
 			}
 		})
