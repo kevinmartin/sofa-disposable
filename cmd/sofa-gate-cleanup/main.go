@@ -371,12 +371,10 @@ func (a api) verify(ctx context.Context, o options) (bool, bool, error) {
 			return false, false, errors.New("result fixture is not exact formatted content")
 		}
 	}
-	wantURL := fmt.Sprintf("https://github.com/%s/pull/%d", consumerRepo, o.DraftPR)
-	wantBody := fmt.Sprintf("Trusted hosted gate result for sofa PR #%d. Suite `%s` at exact candidate `%s` and base `%s`; the only change is gofmt of fixture/greeting.go.\n\nThe candidate's report was revalidated by trusted disposable code before publication.", o.SofaPR, o.suite(), o.CandidateSHA, o.PRBaseSHA)
 	if pr.State != "open" && pr.State != "closed" {
 		return false, false, errors.New("draft PR state invalid")
 	}
-	if !pr.Draft || pr.Title != fmt.Sprintf("E2E fixture: format greeting for sofa PR #%d", o.SofaPR) || pr.Body != wantBody || pr.HTMLURL != wantURL || pr.Head.Ref != o.result() || (resultExists && (pr.Head.SHA != resultSHA || pr.Head.Repo.FullName != consumerRepo)) || pr.Base.Ref != "main" || pr.Base.Repo.FullName != consumerRepo {
+	if !ownedDraft(o, pr, resultExists) {
 		return false, false, errors.New("draft PR ownership mismatch")
 	}
 	if resultExists {
@@ -390,6 +388,17 @@ func (a api) verify(ctx context.Context, o options) (bool, bool, error) {
 }
 
 type refDeleter func(context.Context, string, string) error
+
+func ownedDraft(o options, pr pull, resultExists bool) bool {
+	wantBody := fmt.Sprintf("Trusted hosted gate result for sofa PR #%d. Suite `%s` at exact candidate `%s` and base `%s`; the only change is gofmt of fixture/greeting.go.\n\nThe candidate's report was revalidated by trusted disposable code before publication.", o.SofaPR, o.suite(), o.CandidateSHA, o.PRBaseSHA)
+	return pr.Number == o.DraftPR && pr.Draft &&
+		pr.Title == fmt.Sprintf("E2E fixture: format greeting for sofa PR #%d", o.SofaPR) &&
+		pr.Body == wantBody &&
+		pr.HTMLURL == fmt.Sprintf("https://github.com/%s/pull/%d", consumerRepo, o.DraftPR) &&
+		pr.Head.Ref == o.result() &&
+		(!resultExists || pr.Head.SHA == o.ResultSHA && pr.Head.Repo.FullName == consumerRepo) &&
+		pr.Base.Ref == "main" && pr.Base.Repo.FullName == consumerRepo
+}
 
 func cleanup(ctx context.Context, a api, o options, deleteRef refDeleter) error {
 	_, _, err := a.verify(ctx, o)
@@ -409,13 +418,20 @@ func cleanup(ctx context.Context, a api, o options, deleteRef refDeleter) error 
 	if err != nil {
 		return err
 	}
+	if !ownedDraft(o, pr, resultExists) {
+		return errors.New("draft PR changed before closure")
+	}
 	if pr.State == "open" {
 		var closed pull
 		if err := a.patch(ctx, fmt.Sprintf("/repos/%s/pulls/%d", consumerRepo, o.DraftPR), map[string]string{"state": "closed"}, &closed); err != nil {
 			return err
 		}
-		if closed.Number != o.DraftPR || closed.State != "closed" {
-			return errors.New("draft PR closure not acknowledged")
+		if closed.State != "closed" || !ownedDraft(o, closed, resultExists) {
+			var restored pull
+			if err := a.patch(ctx, fmt.Sprintf("/repos/%s/pulls/%d", consumerRepo, o.DraftPR), map[string]string{"state": "open"}, &restored); err != nil || restored.Number != o.DraftPR || restored.State != "open" {
+				return errors.New("draft PR changed during closure and restoration failed")
+			}
+			return errors.New("draft PR changed during closure; original open state restored")
 		}
 	}
 	// Caller first: if interrupted, the closed PR still anchors verification of
