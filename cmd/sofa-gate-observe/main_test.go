@@ -148,22 +148,38 @@ func TestUnpackZIPRequiresExactBoundedEntries(t *testing.T) {
 	}
 }
 
-func TestValidJobsRequiresAllThreeCurrentJobs(t *testing.T) {
-	j := jobList{TotalCount: 3}
+func TestValidJobsRequiresThreeSuccessesAndSkippedDenial(t *testing.T) {
+	j := jobList{TotalCount: 4}
 	for _, name := range []string{"candidate / execute", "candidate / verify", "candidate / publish"} {
 		j.Jobs = append(j.Jobs, struct {
 			Name       string `json:"name"`
 			Conclusion string `json:"conclusion"`
 			Status     string `json:"status"`
 			RunAttempt int    `json:"run_attempt"`
-		}{name, "success", "completed", 1})
+	}{name, "success", "completed", 1})
 	}
+	j.Jobs = append(j.Jobs, struct {
+		Name       string `json:"name"`
+		Conclusion string `json:"conclusion"`
+		Status     string `json:"status"`
+		RunAttempt int    `json:"run_attempt"`
+	}{"candidate / assert-denied", "skipped", "completed", 1})
 	if !validJobs(j) {
 		t.Fatal("valid jobs rejected")
 	}
 	j.Jobs[1].Conclusion = "skipped"
 	if validJobs(j) {
 		t.Fatal("skipped verify accepted")
+	}
+	j.Jobs[1].Conclusion = "success"
+	j.Jobs[3].Conclusion = "success"
+	if validJobs(j) {
+		t.Fatal("unexpectedly executed denial assertion accepted")
+	}
+	j.Jobs[3].Conclusion = "skipped"
+	j.Jobs = j.Jobs[:3]
+	if validJobs(j) {
+		t.Fatal("missing denial assertion accepted")
 	}
 }
 
@@ -203,7 +219,7 @@ func TestCompletedRunSelectsNewestExactSuiteBeforeCheckingOutcome(t *testing.T) 
 				case strings.HasSuffix(r.URL.Path, "/actions/workflows/sofa-gate.yml/runs"):
 					body = listed
 				case strings.HasSuffix(r.URL.Path, fmt.Sprintf("/actions/runs/%d/jobs", tc.id)) && tc.ready:
-					body = []byte(`{"total_count":3,"jobs":[{"name":"candidate / execute","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / verify","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / publish","status":"completed","conclusion":"success","run_attempt":1}]}`)
+					body = []byte(`{"total_count":4,"jobs":[{"name":"candidate / execute","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / verify","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / publish","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / assert-denied","status":"completed","conclusion":"skipped","run_attempt":1}]}`)
 				default:
 					t.Errorf("unexpected request %s", r.URL.String())
 					return nil, fmt.Errorf("unexpected request")

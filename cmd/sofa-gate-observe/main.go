@@ -272,18 +272,20 @@ func (c client) completedRun(ctx context.Context, branch, branchSHA string) (wor
 }
 
 func validJobs(j jobList) bool {
-	if j.TotalCount != 3 || len(j.Jobs) != 3 {
+	if j.TotalCount != 4 || len(j.Jobs) != 4 {
 		return false
 	}
-	want := map[string]bool{"candidate / execute": false, "candidate / verify": false, "candidate / publish": false}
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "success", "candidate / assert-denied": "skipped"}
+	seen := make(map[string]bool, len(want))
 	for _, item := range j.Jobs {
-		if _, ok := want[item.Name]; !ok || want[item.Name] || item.Status != "completed" || item.Conclusion != "success" || item.RunAttempt != 1 {
+		conclusion, ok := want[item.Name]
+		if !ok || seen[item.Name] || item.Status != "completed" || item.Conclusion != conclusion || item.RunAttempt != 1 {
 			return false
 		}
-		want[item.Name] = true
+		seen[item.Name] = true
 	}
-	for _, found := range want {
-		if !found {
+	for name := range want {
+		if !seen[name] {
 			return false
 		}
 	}
