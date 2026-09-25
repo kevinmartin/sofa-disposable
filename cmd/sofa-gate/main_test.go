@@ -56,6 +56,36 @@ func TestWorkflowAuthoringUsesOnlyScopedCredential(t *testing.T) {
 	}
 }
 
+func TestDispatchRequiresScopedCredentialBeforeNetworkWrite(t *testing.T) {
+	t.Setenv("GITHUB_RUN_ID", "123")
+	p := testPull(strings.Repeat("a", 40), strings.Repeat("b", 40))
+	branch := "sofa-e2e/" + suiteID(p, strings.Repeat("c", 40))
+	status := &fakeGateStatus{}
+	dispatches := 0
+	a := api{token: "general-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost {
+			dispatches++
+			t.Fatal("dispatch sent a request without the scoped credential")
+		}
+		if r.Header.Get("Authorization") != "Bearer general-token" {
+			t.Fatal("metadata read used an unexpected credential")
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/workflows/sofa-gate.yml/runs"):
+			return testResponse(http.StatusOK, `{"total_count":0,"workflow_runs":[]}`), nil
+		case r.URL.Path == "/repos/"+sofaRepo+"/pulls/2":
+			body, _ := json.Marshal(p)
+			return testResponse(http.StatusOK, string(body)), nil
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		return nil, nil
+	})}}
+	err := a.dispatchOnce(context.Background(), p, branch)
+	if err == nil || !strings.Contains(err.Error(), "credential unavailable") || dispatches != 0 || len(status.published) != 1 || status.published[0].State != gatestatus.Pending {
+		t.Fatalf("missing scoped credential did not fail closed: published=%+v dispatches=%d err=%v", status.published, dispatches, err)
+	}
+}
+
 func TestEnsureBranchUsesScopedCredentialForEveryGitWrite(t *testing.T) {
 	base, treeSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	createdTree, createdCommit := strings.Repeat("c", 40), strings.Repeat("d", 40)
@@ -148,7 +178,7 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 	}
 	dispatched := ""
 	status := &fakeGateStatus{}
-	a := api{token: "read-dispatch-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	a := api{token: "read-dispatch-token", workflowToken: "workflow-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		path := r.URL.Path
 		switch {
 		case r.Method == http.MethodGet && path == "/repos/"+sofaRepo+"/pulls":
@@ -176,6 +206,9 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 			}
 			return respond(200, runList{})
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/actions/workflows/sofa-gate.yml/dispatches"):
+			if r.Header.Get("Authorization") != "Bearer workflow-token" {
+				t.Fatal("dispatch used the general job token")
+			}
 			var request struct {
 				Ref string `json:"ref"`
 			}
@@ -343,7 +376,7 @@ func TestFailedRerunBecomesPendingAndExhaustionBecomesFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			status := &fakeGateStatus{latest: gatestatus.Snapshot{Found: true, Source: true, State: gatestatus.Success, Description: suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Success)}}
 			dispatches := 0
-			a := api{token: "default-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			a := api{token: "default-token", workflowToken: "workflow-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				switch {
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/actions/workflows/sofa-gate.yml/runs"):
 					body, _ := json.Marshal(runList{TotalCount: 1, Runs: []workflowRun{{ID: 42, HeadBranch: branch, Status: "completed", Conclusion: "failure", CreatedAt: time.Now().Add(-tc.age)}}})
@@ -352,6 +385,9 @@ func TestFailedRerunBecomesPendingAndExhaustionBecomesFailure(t *testing.T) {
 					body, _ := json.Marshal(p)
 					return testResponse(200, string(body)), nil
 				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/dispatches"):
+					if r.Header.Get("Authorization") != "Bearer workflow-token" {
+						t.Fatal("retry dispatch used the general job token")
+					}
 					dispatches++
 					return testResponse(204, ""), nil
 				}

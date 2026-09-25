@@ -418,7 +418,9 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	}); err != nil {
 		return fmt.Errorf("mark exact sofa revision pending: %w", err)
 	}
-	err = a.post(ctx, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", map[string]any{
+	// A dispatch created with GITHUB_TOKEN does not emit a workflow_run wakeup.
+	// Use the scoped workflow credential that also authored this candidate ref.
+	err = a.postWorkflow(ctx, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", map[string]any{
 		"ref":    branch,
 		"inputs": map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA},
 	}, nil)
