@@ -21,7 +21,7 @@ func completionWakeContract(data []byte) error {
 		"  workflow_dispatch:\n",
 		"  schedule:\n",
 		"  workflow_run:\n",
-		"    workflows: ['sofa hosted E2E candidate']",
+		"    workflows: ['sofa hosted E2E coordinator', 'sofa hosted E2E candidate']",
 		"    types: [completed]",
 		"    branches: ['sofa-e2e/**']",
 	} {

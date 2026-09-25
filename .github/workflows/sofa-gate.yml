@@ -30,7 +30,9 @@ on:
   # A completed candidate run only wakes the trusted default-branch scan.
   # It does not supply a PR, SHA, artifact, or status decision to either job.
   workflow_run:
-    workflows: ['sofa hosted E2E candidate']
+    # GitHub indexes this file under its default-branch name, even when the
+    # suite branch gives the dispatched run a different display name.
+    workflows: ['sofa hosted E2E coordinator', 'sofa hosted E2E candidate']
     types: [completed]
     branches: ['sofa-e2e/**']
 
