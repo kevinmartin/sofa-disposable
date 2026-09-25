@@ -27,6 +27,12 @@ on:
         required: false
   schedule:
     - cron: '17,47 * * * *'
+  # A completed candidate run only wakes the trusted default-branch scan.
+  # It does not supply a PR, SHA, artifact, or status decision to either job.
+  workflow_run:
+    workflows: ['sofa hosted E2E candidate']
+    types: [completed]
+    branches: ['sofa-e2e/**']
 
 permissions: {}
 
@@ -36,7 +42,17 @@ concurrency:
 
 jobs:
   coordinate:
-    if: github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main' && github.event.repository.fork == false
+    if: >-
+      github.repository == 'kevinmartin/sofa-disposable' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.fork == false &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_run' &&
+          github.event.workflow_run.name == 'sofa hosted E2E candidate' &&
+          github.event.workflow_run.head_repository.full_name == 'kevinmartin/sofa-disposable' &&
+          github.event.workflow_run.event == 'workflow_dispatch' &&
+          github.event.workflow_run.path == '.github/workflows/sofa-gate.yml' &&
+          startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')))
     environment: sofa-gate-coordinator
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -67,7 +83,17 @@ jobs:
         run: go run ./cmd/sofa-gate
 
   observe:
-    if: github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main' && github.event.repository.fork == false
+    if: >-
+      github.repository == 'kevinmartin/sofa-disposable' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.fork == false &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_run' &&
+          github.event.workflow_run.name == 'sofa hosted E2E candidate' &&
+          github.event.workflow_run.head_repository.full_name == 'kevinmartin/sofa-disposable' &&
+          github.event.workflow_run.event == 'workflow_dispatch' &&
+          github.event.workflow_run.path == '.github/workflows/sofa-gate.yml' &&
+          startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')))
     environment: sofa-gate-coordinator
     runs-on: ubuntu-24.04
     timeout-minutes: 10
