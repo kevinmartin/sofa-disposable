@@ -362,6 +362,11 @@ func TestFailedRerunBecomesPendingAndExhaustionBecomesFailure(t *testing.T) {
 			if (err != nil) != tc.wantErr || len(status.published) != 1 || status.published[0].State != tc.wantStatus || dispatches != btoi(!tc.wantErr) {
 				t.Fatalf("failed rerun left green: published=%+v dispatches=%d err=%v", status.published, dispatches, err)
 			}
+			if tc.wantErr {
+				if err := a.dispatchOnce(context.Background(), p, branch); err == nil || len(status.published) != 1 {
+					t.Fatalf("exhaustion appended a duplicate failure status: published=%+v err=%v", status.published, err)
+				}
+			}
 		})
 	}
 }

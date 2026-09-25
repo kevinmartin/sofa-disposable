@@ -67,6 +67,17 @@ func (a api) publishPending(ctx context.Context, p pull, suite, runURL string) e
 	})
 }
 
+func (a api) publishFailure(ctx context.Context, p pull, description, runURL string) error {
+	current, err := a.statusWriter().Latest(ctx, p.Head.SHA)
+	if err == nil && current.Found && current.Source && current.State == gatestatus.Failure && current.Description == description {
+		return nil
+	}
+	return a.statusWriter().Publish(ctx, gatestatus.Result{
+		PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
+		State: gatestatus.Failure, RunURL: runURL, Description: description,
+	})
+}
+
 func (a api) reconcileStatus(ctx context.Context, p pull, suite string) error {
 	status, err := a.statusWriter().Latest(ctx, p.Head.SHA)
 	if err != nil {
@@ -338,13 +349,10 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	if err != nil {
 		if errors.Is(err, errRetryBudget) {
 			runURL := coordinatorRunURL()
-			if len(runs.Runs) != 0 && runs.Runs[0].ID > 0 {
-				runURL = fmt.Sprintf("https://github.com/%s/actions/runs/%d", disposableRepo, runs.Runs[0].ID)
+			if newest := newestRun(runs); newest.ID > 0 {
+				runURL = fmt.Sprintf("https://github.com/%s/actions/runs/%d", disposableRepo, newest.ID)
 			}
-			if publishErr := a.statusWriter().Publish(ctx, gatestatus.Result{
-				PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
-				State: gatestatus.Failure, RunURL: runURL, Description: suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Failure),
-			}); publishErr != nil {
+			if publishErr := a.publishFailure(ctx, p, suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Failure), runURL); publishErr != nil {
 				return fmt.Errorf("hosted retry budget exhausted and failure status unavailable: %w", publishErr)
 			}
 		}
@@ -501,10 +509,7 @@ func run(ctx context.Context, a api) error {
 			if branch != "" {
 				description = suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Failure)
 			}
-			if publishErr := a.statusWriter().Publish(ctx, gatestatus.Result{
-				PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
-				State: gatestatus.Failure, RunURL: coordinatorRunURL(), Description: description,
-			}); publishErr != nil {
+			if publishErr := a.publishFailure(ctx, p, description, coordinatorRunURL()); publishErr != nil {
 				return fmt.Errorf("suite preparation failed (%v) and failure status unavailable: %w", err, publishErr)
 			}
 			return err
