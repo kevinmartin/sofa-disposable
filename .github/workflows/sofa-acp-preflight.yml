@@ -12,6 +12,26 @@ jobs:
       contents: read
       copilot-requests: write
     steps:
+      - name: Initialize redacted probe report
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/sofa-acp-preflight-result"
+          cat > "$RUNNER_TEMP/sofa-acp-preflight-result/report.json" <<'JSON'
+          {
+            "schema": 1,
+            "status": "not_run",
+            "copilot_version": "1.0.86",
+            "copilot_binary_sha256": "ea4a519d7b2ff54e9c7d10ae9921cf4ab3f5041489ec340852f47f4f63fc535b",
+            "copilot_package_sha256": "53284019748ac198c3dbcf9ba17f0541c8fcaaee16e6c644eb0e7285cdfd6112",
+            "image": "node:24-bookworm@sha256:b977d0f785d96029d8d4c0790b6bf1c2a4c72e0f26319808e7ba2e9d966a1ac3",
+            "variants": [
+              {"name": "baseline", "exit_code": null},
+              {"name": "roomy_tmp", "exit_code": null},
+              {"name": "node_user", "exit_code": null},
+              {"name": "package_entry", "exit_code": null}
+            ]
+          }
+          JSON
       - name: Check out disposable workspace
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -61,7 +81,10 @@ jobs:
         env:
           SOFA_MODEL_TOKEN: ${{ github.token }}
         run: |
-          set +e
+          baseline_exit=not_run
+          roomy_tmp_exit=not_run
+          node_user_exit=not_run
+          package_entry_exit=not_run
           for variant in baseline roomy_tmp node_user package_entry; do
             user_arg="$(id -u):$(id -g)"
             tmp_size=256m
@@ -72,7 +95,7 @@ jobs:
               package_entry) package_entry=/copilot-package/package/index.js ;;
             esac
             echo "sofa ACP preflight variant: $variant"
-            docker run --rm --platform linux/amd64 \
+            if docker run --rm --platform linux/amd64 \
               --user "$user_arg" \
               --cap-drop ALL --security-opt no-new-privileges --read-only \
               --pids-limit 128 --memory 3g --cpus 2 \
@@ -87,6 +110,48 @@ jobs:
               --env HOME=/home/sofa \
               --env PATH=/toolkit:/copilot:/usr/local/bin:/usr/bin:/bin \
               node:24-bookworm@sha256:b977d0f785d96029d8d4c0790b6bf1c2a4c72e0f26319808e7ba2e9d966a1ac3 \
-              /toolkit/sofa-acp-preflight
-            echo "sofa ACP preflight variant exit: $variant $?"
+              /toolkit/sofa-acp-preflight; then
+              code=0
+            else
+              code=$?
+            fi
+            echo "sofa ACP preflight variant exit: $variant $code"
+            case "$variant" in
+              baseline) baseline_exit=$code ;;
+              roomy_tmp) roomy_tmp_exit=$code ;;
+              node_user) node_user_exit=$code ;;
+              package_entry) package_entry_exit=$code ;;
+            esac
           done
+          report_status=failed
+          if (( package_entry_exit == 0 )); then
+            report_status=passed
+          fi
+          cat > "$RUNNER_TEMP/sofa-acp-preflight-result/report.json" <<JSON
+          {
+            "schema": 1,
+            "status": "$report_status",
+            "copilot_version": "1.0.86",
+            "copilot_binary_sha256": "ea4a519d7b2ff54e9c7d10ae9921cf4ab3f5041489ec340852f47f4f63fc535b",
+            "copilot_package_sha256": "53284019748ac198c3dbcf9ba17f0541c8fcaaee16e6c644eb0e7285cdfd6112",
+            "image": "node:24-bookworm@sha256:b977d0f785d96029d8d4c0790b6bf1c2a4c72e0f26319808e7ba2e9d966a1ac3",
+            "variants": [
+              {"name": "baseline", "exit_code": $baseline_exit},
+              {"name": "roomy_tmp", "exit_code": $roomy_tmp_exit},
+              {"name": "node_user", "exit_code": $node_user_exit},
+              {"name": "package_entry", "exit_code": $package_entry_exit}
+            ]
+          }
+          JSON
+          if (( package_entry_exit != 0 )); then
+            echo 'Required package_entry ACP startup failed' >&2
+            exit 1
+          fi
+      - name: Upload redacted probe report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sofa-acp-preflight-report
+          path: ${{ runner.temp }}/sofa-acp-preflight-result/report.json
+          if-no-files-found: error
+          retention-days: 14
