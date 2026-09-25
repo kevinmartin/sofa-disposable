@@ -30,6 +30,7 @@ const (
 )
 
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var errRetryBudget = errors.New("hosted suite retry budget exhausted")
 
 type api struct {
 	http          *http.Client
@@ -323,8 +324,11 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 // dispatch a duplicate. The observer separately insists on a successful
 // latest run and never treats a failed or missing run as green.
 func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
-	if list.TotalCount < 0 || list.TotalCount > 8 || len(list.Runs) != list.TotalCount {
-		return false, errors.New("hosted suite dispatch limit or run listing invalid")
+	if list.TotalCount > 8 {
+		return false, errRetryBudget
+	}
+	if list.TotalCount < 0 || len(list.Runs) != list.TotalCount {
+		return false, errors.New("hosted suite run listing invalid")
 	}
 	if list.TotalCount == 0 {
 		return true, nil
@@ -357,7 +361,7 @@ func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
 		return false, errors.New("hosted suite run outcome needs inspection")
 	}
 	if list.TotalCount >= 8 || now.Sub(oldest) >= 45*time.Minute {
-		return false, errors.New("hosted suite retry budget exhausted")
+		return false, errRetryBudget
 	}
 	return true, nil
 }
@@ -390,6 +394,7 @@ func run(ctx context.Context, a api) error {
 			return err
 		}
 	}
+	exhausted := 0
 	for _, listed := range prs {
 		p, err := a.currentPR(ctx, listed.Number)
 		if err != nil {
@@ -411,8 +416,16 @@ func run(ctx context.Context, a api) error {
 			return err
 		}
 		if err := a.dispatchOnce(ctx, p, branch); err != nil {
+			if manual == "" && errors.Is(err, errRetryBudget) {
+				exhausted++
+				fmt.Printf("PR %d hosted suite exhausted its finite retry budget; continuing discovery\n", p.Number)
+				continue
+			}
 			return err
 		}
+	}
+	if exhausted != 0 {
+		return fmt.Errorf("%d hosted suite(s) exhausted their retry budget", exhausted)
 	}
 	return nil
 }
