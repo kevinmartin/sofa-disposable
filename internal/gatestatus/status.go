@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	sofaRepository = "kevinmartin/sofa"
-	statusContext  = "sofa / hosted-e2e"
-	apiURL         = "https://api.github.com"
+	sofaRepository       = "kevinmartin/sofa"
+	disposableRepository = "kevinmartin/sofa-disposable"
+	statusContext        = "sofa / hosted-e2e"
+	apiURL               = "https://api.github.com"
 )
 
 var sha40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -70,6 +71,43 @@ type Snapshot struct {
 	Source      bool
 	State       State
 	Description string
+}
+
+// DispatchToken mints an installation token for starting the trusted gate in
+// sofa-disposable. The token is restricted to that repository and the minimum
+// permissions needed to dispatch a workflow; callers must keep it ephemeral.
+func (w Writer) DispatchToken(ctx context.Context) (string, error) {
+	jwt, err := w.appJWT()
+	if err != nil {
+		return "", err
+	}
+	var installation struct {
+		ID int64 `json:"id"`
+	}
+	if err := w.request(ctx, http.MethodGet, "/repos/"+disposableRepository+"/installation", jwt, nil, &installation, http.StatusOK); err != nil {
+		return "", fmt.Errorf("find disposable App installation: %w", err)
+	}
+	if installation.ID <= 0 {
+		return "", errors.New("invalid disposable App installation")
+	}
+	request := struct {
+		Repositories []string          `json:"repositories"`
+		Permissions  map[string]string `json:"permissions"`
+	}{
+		Repositories: []string{"sofa-disposable"},
+		Permissions:  map[string]string{"actions": "write", "metadata": "read"},
+	}
+	var credential struct {
+		Token string `json:"token"`
+	}
+	path := fmt.Sprintf("/app/installations/%d/access_tokens", installation.ID)
+	if err := w.request(ctx, http.MethodPost, path, jwt, request, &credential, http.StatusCreated); err != nil {
+		return "", fmt.Errorf("mint disposable dispatch token: %w", err)
+	}
+	if credential.Token == "" || strings.TrimSpace(credential.Token) != credential.Token || strings.ContainsAny(credential.Token, "\r\n\x00") {
+		return "", errors.New("invalid disposable dispatch token")
+	}
+	return credential.Token, nil
 }
 
 // Latest reads only a bounded first page. An ambiguous or unavailable page

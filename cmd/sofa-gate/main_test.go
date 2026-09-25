@@ -20,9 +20,17 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type fakeGateStatus struct {
-	latest    gatestatus.Snapshot
-	latestErr error
-	published []gatestatus.Result
+	latest        gatestatus.Snapshot
+	latestErr     error
+	published     []gatestatus.Result
+	dispatchToken string
+}
+
+func (f *fakeGateStatus) DispatchToken(context.Context) (string, error) {
+	if f.dispatchToken == "" {
+		return "", errors.New("App dispatch token unavailable")
+	}
+	return f.dispatchToken, nil
 }
 
 func (f *fakeGateStatus) Latest(context.Context, string) (gatestatus.Snapshot, error) {
@@ -56,7 +64,7 @@ func TestWorkflowAuthoringUsesOnlyScopedCredential(t *testing.T) {
 	}
 }
 
-func TestDispatchRequiresScopedCredentialBeforeNetworkWrite(t *testing.T) {
+func TestDispatchRequiresAppCredentialBeforeNetworkWrite(t *testing.T) {
 	t.Setenv("GITHUB_RUN_ID", "123")
 	p := testPull(strings.Repeat("a", 40), strings.Repeat("b", 40))
 	branch := "sofa-e2e/" + suiteID(p, strings.Repeat("c", 40))
@@ -81,7 +89,7 @@ func TestDispatchRequiresScopedCredentialBeforeNetworkWrite(t *testing.T) {
 		return nil, nil
 	})}}
 	err := a.dispatchOnce(context.Background(), p, branch)
-	if err == nil || !strings.Contains(err.Error(), "credential unavailable") || dispatches != 0 || len(status.published) != 1 || status.published[0].State != gatestatus.Pending {
+	if err == nil || !strings.Contains(err.Error(), "App dispatch credential unavailable") || dispatches != 0 || len(status.published) != 1 || status.published[0].State != gatestatus.Pending {
 		t.Fatalf("missing scoped credential did not fail closed: published=%+v dispatches=%d err=%v", status.published, dispatches, err)
 	}
 }
@@ -177,7 +185,7 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
 	}
 	dispatched := ""
-	status := &fakeGateStatus{}
+	status := &fakeGateStatus{dispatchToken: "app-actions-token"}
 	a := api{token: "read-dispatch-token", workflowToken: "workflow-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		path := r.URL.Path
 		switch {
@@ -206,8 +214,8 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 			}
 			return respond(200, runList{})
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/actions/workflows/sofa-gate.yml/dispatches"):
-			if r.Header.Get("Authorization") != "Bearer workflow-token" {
-				t.Fatal("dispatch used the general job token")
+			if r.Header.Get("Authorization") != "Bearer app-actions-token" {
+				t.Fatal("dispatch did not use the disposable-scoped App token")
 			}
 			var request struct {
 				Ref string `json:"ref"`
@@ -374,7 +382,7 @@ func TestFailedRerunBecomesPendingAndExhaustionBecomesFailure(t *testing.T) {
 		{"exhausted", time.Hour, gatestatus.Failure, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status := &fakeGateStatus{latest: gatestatus.Snapshot{Found: true, Source: true, State: gatestatus.Success, Description: suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Success)}}
+			status := &fakeGateStatus{dispatchToken: "app-actions-token", latest: gatestatus.Snapshot{Found: true, Source: true, State: gatestatus.Success, Description: suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Success)}}
 			dispatches := 0
 			a := api{token: "default-token", workflowToken: "workflow-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				switch {
@@ -385,8 +393,8 @@ func TestFailedRerunBecomesPendingAndExhaustionBecomesFailure(t *testing.T) {
 					body, _ := json.Marshal(p)
 					return testResponse(200, string(body)), nil
 				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/dispatches"):
-					if r.Header.Get("Authorization") != "Bearer workflow-token" {
-						t.Fatal("retry dispatch used the general job token")
+					if r.Header.Get("Authorization") != "Bearer app-actions-token" {
+						t.Fatal("retry dispatch did not use the disposable-scoped App token")
 					}
 					dispatches++
 					return testResponse(204, ""), nil
