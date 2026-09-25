@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"go/format"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,7 +113,14 @@ func testAPI(t *testing.T, o options, active, badCaller, badResult, missingCalle
 				http.Error(w, "wrong token", http.StatusForbidden)
 				return
 			}
-			pr.State = "closed"
+			var change struct {
+				State string `json:"state"`
+			}
+			if json.NewDecoder(r.Body).Decode(&change) != nil || (change.State != "open" && change.State != "closed") {
+				http.Error(w, "invalid state", http.StatusBadRequest)
+				return
+			}
+			pr.State = change.State
 			jsonReply(w, pr)
 		default:
 			http.Error(w, "unhandled", http.StatusNotFound)
@@ -172,6 +181,39 @@ func TestCleanupClosesThenDeletesOnlyExactOwnedRefs(t *testing.T) {
 	}
 	if !closed {
 		t.Fatal("draft PR was not closed")
+	}
+}
+
+func TestCleanupRestoresPRChangedAtClosureWithoutDeletingRefs(t *testing.T) {
+	o := testOptions()
+	o.Apply = true
+	a, calls := testAPI(t, o, false, false, false, false)
+	underlying := a.client.Transport
+	mutated := false
+	a.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		response, err := underlying.RoundTrip(r)
+		if err != nil || r.Method != http.MethodPatch || mutated {
+			return response, err
+		}
+		mutated = true
+		response.Body.Close()
+		changed := pull{Number: o.DraftPR, State: "closed", Draft: false}
+		encoded, _ := json.Marshal(changed)
+		response.Body = io.NopCloser(bytes.NewReader(encoded))
+		return response, nil
+	})}
+	deleted := false
+	if err := cleanup(context.Background(), a, o, func(context.Context, string, string) error { deleted = true; return nil }); err == nil || deleted {
+		t.Fatalf("concurrent PR change escaped cleanup guard: deleted=%t err=%v", deleted, err)
+	}
+	patches := 0
+	for _, call := range *calls {
+		if strings.HasPrefix(call, "PATCH ") {
+			patches++
+		}
+	}
+	if patches != 2 {
+		t.Fatalf("cleanup did not close then restore PR: %v", *calls)
 	}
 }
 
