@@ -112,6 +112,46 @@ func TestValidateArtifactRejectsHostileOrStaleData(t *testing.T) {
 	}
 }
 
+func TestValidateDenialArtifactRequiresExactIdentityAndZeroRequests(t *testing.T) {
+	p := testPull()
+	mainSHA := strings.Repeat("c", 40)
+	r := workflowRun{ID: 42, RunAttempt: 1}
+	for _, tc := range []struct{ kind, decision string }{{"non-ready", "admission-denied"}, {"completed-redelivery", "already-completed"}} {
+		t.Run(tc.kind, func(t *testing.T) {
+			d := denialReport{SchemaVersion: 1, SuiteID: denialSuiteID(p, mainSHA, tc.kind), Scenario: "denied", DenialKind: tc.kind, Decision: tc.decision,
+				CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA, DisposableBaseSHA: mainSHA, RunID: "42", RunAttempt: 1,
+				SkippedJobs: []string{"execute", "verify", "publish"}}
+			encode := func(v denialReport) []byte {
+				b, err := json.Marshal(v)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return b
+			}
+			if err := validateDenialArtifact(encode(d), p, r, mainSHA, tc.kind); err != nil {
+				t.Fatal(err)
+			}
+			for _, mutate := range []func(*denialReport){
+				func(d *denialReport) { d.SuiteID = suiteID(p, mainSHA) },
+				func(d *denialReport) { d.Decision = "allowed" },
+				func(d *denialReport) { d.CandidateSHA = strings.Repeat("e", 40) },
+				func(d *denialReport) { d.RunID = "41" },
+				func(d *denialReport) { d.FakePromptRequests = 1 },
+				func(d *denialReport) { d.ProviderRequests = 1 },
+				func(d *denialReport) { d.PublicationWrites = 1 },
+				func(d *denialReport) { d.WriteCredentials = 1 },
+				func(d *denialReport) { d.SkippedJobs = []string{"execute", "verify"} },
+			} {
+				bad := d
+				mutate(&bad)
+				if err := validateDenialArtifact(encode(bad), p, r, mainSHA, tc.kind); err == nil {
+					t.Fatal("invalid denial accepted", bad)
+				}
+			}
+		})
+	}
+}
+
 func TestUnpackZIPRequiresExactBoundedEntries(t *testing.T) {
 	files, _, _, _, _ := testArtifacts(t)
 	makeZIP := func(extra string) []byte {
@@ -148,22 +188,30 @@ func TestUnpackZIPRequiresExactBoundedEntries(t *testing.T) {
 	}
 }
 
-func TestValidJobsRequiresThreeSuccessesAndSkippedDenial(t *testing.T) {
-	j := jobList{TotalCount: 4}
-	for _, name := range []string{"candidate / execute", "candidate / verify", "candidate / publish"} {
+func expectedJobs() jobList {
+	want := []struct{ name, conclusion string }{
+		{"candidate / execute", "success"}, {"candidate / verify", "success"}, {"candidate / publish", "success"}, {"candidate / assert-denied", "skipped"},
+	}
+	for _, job := range []string{"deny-non-ready", "deny-completed-redelivery"} {
+		for _, name := range []string{"execute", "verify", "publish"} {
+			want = append(want, struct{ name, conclusion string }{job + " / " + name, "skipped"})
+		}
+		want = append(want, struct{ name, conclusion string }{job + " / assert-denied", "success"})
+	}
+	j := jobList{TotalCount: len(want)}
+	for _, item := range want {
 		j.Jobs = append(j.Jobs, struct {
 			Name       string `json:"name"`
 			Conclusion string `json:"conclusion"`
 			Status     string `json:"status"`
 			RunAttempt int    `json:"run_attempt"`
-	}{name, "success", "completed", 1})
+		}{item.name, item.conclusion, "completed", 1})
 	}
-	j.Jobs = append(j.Jobs, struct {
-		Name       string `json:"name"`
-		Conclusion string `json:"conclusion"`
-		Status     string `json:"status"`
-		RunAttempt int    `json:"run_attempt"`
-	}{"candidate / assert-denied", "skipped", "completed", 1})
+	return j
+}
+
+func TestValidJobsRequiresEditAndBothDenials(t *testing.T) {
+	j := expectedJobs()
 	if !validJobs(j) {
 		t.Fatal("valid jobs rejected")
 	}
@@ -177,9 +225,19 @@ func TestValidJobsRequiresThreeSuccessesAndSkippedDenial(t *testing.T) {
 		t.Fatal("unexpectedly executed denial assertion accepted")
 	}
 	j.Jobs[3].Conclusion = "skipped"
-	j.Jobs = j.Jobs[:3]
+	j.Jobs = j.Jobs[:len(j.Jobs)-1]
 	if validJobs(j) {
-		t.Fatal("missing denial assertion accepted")
+		t.Fatal("missing completed-redelivery assertion accepted")
+	}
+	j = expectedJobs()
+	j.Jobs[len(j.Jobs)-1].Conclusion = "skipped"
+	if validJobs(j) {
+		t.Fatal("skipped completed-redelivery assertion accepted")
+	}
+	j = expectedJobs()
+	j.Jobs[7].Conclusion = "failure"
+	if validJobs(j) {
+		t.Fatal("failed non-ready assertion accepted")
 	}
 }
 
@@ -219,7 +277,7 @@ func TestCompletedRunSelectsNewestExactSuiteBeforeCheckingOutcome(t *testing.T) 
 				case strings.HasSuffix(r.URL.Path, "/actions/workflows/sofa-gate.yml/runs"):
 					body = listed
 				case strings.HasSuffix(r.URL.Path, fmt.Sprintf("/actions/runs/%d/jobs", tc.id)) && tc.ready:
-					body = []byte(`{"total_count":4,"jobs":[{"name":"candidate / execute","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / verify","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / publish","status":"completed","conclusion":"success","run_attempt":1},{"name":"candidate / assert-denied","status":"completed","conclusion":"skipped","run_attempt":1}]}`)
+					body, _ = json.Marshal(expectedJobs())
 				default:
 					t.Errorf("unexpected request %s", r.URL.String())
 					return nil, fmt.Errorf("unexpected request")

@@ -460,4 +460,56 @@ func TestSuiteBranchBindsFullCandidateAndBaseWithoutSecrets(t *testing.T) {
 			t.Fatalf("generated candidate workflow contains %q", forbidden)
 		}
 	}
+	jobs := []struct {
+		name, suite, scenario, denialKind string
+	}{
+		{"candidate", id, "edit", ""},
+		{"deny-non-ready", denialSuiteID(p, consumerBase, "non-ready"), "denied", "non-ready"},
+		{"deny-completed-redelivery", denialSuiteID(p, consumerBase, "completed-redelivery"), "denied", "completed-redelivery"},
+	}
+	if jobs[0].suite == jobs[1].suite || jobs[0].suite == jobs[2].suite || jobs[1].suite == jobs[2].suite {
+		t.Fatal("hosted scenarios share an artifact suite ID")
+	}
+	if strings.Count(workflow, "    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@") != len(jobs) {
+		t.Fatal("caller does not have exactly three candidate reusable calls")
+	}
+	for i, job := range jobs {
+		start := strings.Index(workflow, "\n  "+job.name+":\n")
+		if start < 0 {
+			t.Fatalf("missing %s job", job.name)
+		}
+		block := workflow[start:]
+		if i+1 < len(jobs) {
+			end := strings.Index(block[1:], "\n  "+jobs[i+1].name+":\n")
+			if end < 0 {
+				t.Fatalf("missing boundary after %s job", job.name)
+			}
+			block = block[:end+1]
+		}
+		for _, required := range []string{
+			"    permissions:\n      contents: read\n      actions: read\n",
+			"    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@" + head,
+			"      suite_id: " + job.suite,
+			"      scenario: " + job.scenario,
+			"      candidate_sha: " + head,
+			"      base_sha: " + base,
+			"      disposable_base_sha: " + consumerBase,
+			"      reconcile_candidate: false",
+		} {
+			if !strings.Contains(block, required) {
+				t.Errorf("%s lacks %q", job.name, required)
+			}
+		}
+		if job.denialKind != "" && !strings.Contains(block, "      denial_kind: "+job.denialKind) {
+			t.Errorf("%s lacks denial kind %q", job.name, job.denialKind)
+		}
+		if job.denialKind == "" && strings.Contains(block, "denial_kind:") {
+			t.Errorf("edit job unexpectedly selects denial")
+		}
+	}
+	if denialSuiteID(p, consumerBase, "non-ready") == denialSuiteID(testPull(head, strings.Repeat("c", 40)), consumerBase, "non-ready") ||
+		denialSuiteID(p, consumerBase, "non-ready") == denialSuiteID(p, strings.Repeat("e", 40), "non-ready") ||
+		denialSuiteID(p, consumerBase, "non-ready") == denialSuiteID(p, consumerBase, "completed-redelivery") {
+		t.Fatal("denial artifact suite IDs are not bound to exact revisions and scenario")
+	}
 }
