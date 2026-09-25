@@ -201,6 +201,13 @@ func suiteID(p pull, consumerBase string) string {
 	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
 }
 
+func denialSuiteID(p pull, consumerBase, kind string) string {
+	// Each reusable call uploads artifacts under its suite ID and GitHub run
+	// identity. Distinct IDs keep both denial reports separate from the edit.
+	digest := sha256.Sum256([]byte(suiteID(p, consumerBase) + ":denied:" + kind))
+	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
+}
+
 func branchWorkflow(p pull, consumerBase string) string {
 	// GitHub requires a literal reusable-workflow ref. This entire caller is
 	// generated from verified fixed metadata; no issue/PR prose enters YAML.
@@ -227,7 +234,35 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
-`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
+  deny-non-ready:
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
+    with:
+      suite_id: %s
+      scenario: denied
+      denial_kind: non-ready
+      candidate_sha: %s
+      base_sha: %s
+      disposable_base_sha: %s
+      reconcile_candidate: false
+  deny-completed-redelivery:
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
+    with:
+      suite_id: %s
+      scenario: denied
+      denial_kind: completed-redelivery
+      candidate_sha: %s
+      base_sha: %s
+      disposable_base_sha: %s
+      reconcile_candidate: false
+`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase,
+		p.Head.SHA, denialSuiteID(p, consumerBase, "non-ready"), p.Head.SHA, p.Base.SHA, consumerBase,
+		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase)
 }
 
 func (a api) checkCandidate(ctx context.Context, p pull) (bool, error) {

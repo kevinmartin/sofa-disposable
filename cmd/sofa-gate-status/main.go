@@ -38,18 +38,25 @@ type observed struct {
 	CandidateDurationMS   int64     `json:"candidate_duration_ms"`
 	ReportArtifactID      int64     `json:"report_artifact_id"`
 	ReportArtifactURL     string    `json:"report_artifact_url"`
-	DraftPR               int       `json:"draft_pr"`
-	DraftPRURL            string    `json:"draft_pr_url"`
-	DraftHeadSHA          string    `json:"draft_head_sha"`
-	DraftHeadRef          string    `json:"draft_head_ref"`
-	DraftBaseRef          string    `json:"draft_base_ref"`
-	DraftState            string    `json:"draft_state"`
-	DraftIsDraft          bool      `json:"draft_is_draft"`
-	OwnedResourceState    string    `json:"owned_resource_cleanup_state"`
+	Denials               []struct {
+		Kind        string `json:"kind"`
+		SuiteID     string `json:"suite_id"`
+		Decision    string `json:"decision"`
+		ArtifactID  int64  `json:"artifact_id"`
+		ArtifactURL string `json:"artifact_url"`
+	} `json:"denials"`
+	DraftPR            int    `json:"draft_pr"`
+	DraftPRURL         string `json:"draft_pr_url"`
+	DraftHeadSHA       string `json:"draft_head_sha"`
+	DraftHeadRef       string `json:"draft_head_ref"`
+	DraftBaseRef       string `json:"draft_base_ref"`
+	DraftState         string `json:"draft_state"`
+	DraftIsDraft       bool   `json:"draft_is_draft"`
+	OwnedResourceState string `json:"owned_resource_cleanup_state"`
 }
 
 func validObserved(r observed) bool {
-	if r.SchemaVersion != 2 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.CandidateRunID < 1 || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.DraftPR < 1 {
+	if r.SchemaVersion != 3 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.CandidateRunID < 1 || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.DraftPR < 1 {
 		return false
 	}
 	if r.CandidateRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID) ||
@@ -66,7 +73,22 @@ func validObserved(r observed) bool {
 		return false
 	}
 	digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
-	return r.SuiteID == fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12])
+	if r.SuiteID != fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]) || len(r.Denials) != 2 {
+		return false
+	}
+	for i, kind := range []string{"non-ready", "completed-redelivery"} {
+		d := r.Denials[i]
+		digest := sha256.Sum256([]byte(r.SuiteID + ":denied:" + kind))
+		decision := map[string]string{"non-ready": "admission-denied", "completed-redelivery": "already-completed"}[kind]
+		if d.Kind != kind || d.SuiteID != fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]) || d.Decision != decision || d.ArtifactID < 1 || d.ArtifactID == r.ReportArtifactID ||
+			d.ArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.CandidateRunID, d.ArtifactID) {
+			return false
+		}
+		if i > 0 && d.ArtifactID == r.Denials[0].ArtifactID {
+			return false
+		}
+	}
+	return true
 }
 
 func parseResults(data []byte) ([]observed, error) {

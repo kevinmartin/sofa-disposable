@@ -114,6 +114,11 @@ func suiteID(p pull, disposableBase string) string {
 	return fmt.Sprintf("p%d-%x", p.Number, h[:12])
 }
 
+func denialSuiteID(p pull, disposableBase, kind string) string {
+	h := sha256.Sum256([]byte(suiteID(p, disposableBase) + ":denied:" + kind))
+	return fmt.Sprintf("p%d-%x", p.Number, h[:12])
+}
+
 func (c client) currentPR(ctx context.Context, number int) (pull, error) {
 	var p pull
 	if err := c.get(ctx, fmt.Sprintf("/repos/%s/pulls/%d", sofaRepo, number), &p); err != nil {
@@ -266,16 +271,22 @@ func (c client) completedRun(ctx context.Context, branch, branchSHA string) (wor
 		return workflowRun{}, false, err
 	}
 	if !validJobs(jobs) {
-		return workflowRun{}, false, errors.New("hosted run lacks successful execute/verify/publish jobs")
+		return workflowRun{}, false, errors.New("hosted run lacks the exact successful edit and denial job matrix")
 	}
 	return newest, true, nil
 }
 
 func validJobs(j jobList) bool {
-	if j.TotalCount != 4 || len(j.Jobs) != 4 {
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "success", "candidate / assert-denied": "skipped"}
+	for _, job := range []string{"deny-non-ready", "deny-completed-redelivery"} {
+		for _, skipped := range []string{"execute", "verify", "publish"} {
+			want[job+" / "+skipped] = "skipped"
+		}
+		want[job+" / assert-denied"] = "success"
+	}
+	if j.TotalCount != len(want) || len(j.Jobs) != len(want) {
 		return false
 	}
-	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "success", "candidate / assert-denied": "skipped"}
 	seen := make(map[string]bool, len(want))
 	for _, item := range j.Jobs {
 		conclusion, ok := want[item.Name]
@@ -292,33 +303,52 @@ func validJobs(j jobList) bool {
 	return true
 }
 
-func (c client) reportArtifact(ctx context.Context, r workflowRun, suite string) (map[string][]byte, int64, error) {
+func (c client) artifactID(ctx context.Context, r workflowRun, name string) (int64, error) {
 	var list artifactList
 	if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/artifacts?per_page=100", consumerRepo, r.ID), &list); err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	if list.TotalCount < 0 || list.TotalCount > 100 || len(list.Artifacts) != list.TotalCount {
-		return nil, 0, errors.New("suite artifact listing invalid or unbounded")
+		return 0, errors.New("suite artifact listing invalid or unbounded")
 	}
-	want := fmt.Sprintf("sofa-e2e-report-%s-%d-%d", suite, r.ID, r.RunAttempt)
 	var id int64
 	for _, a := range list.Artifacts {
-		if a.Name != want {
+		if a.Name != name {
 			continue
 		}
 		if id != 0 || a.ID < 1 || a.RunSource.ID != r.ID || a.Expired || a.Size < 1 || a.Size > maxArtifactZip {
-			return nil, 0, errors.New("ambiguous or invalid hosted report artifact")
+			return 0, errors.New("ambiguous or invalid hosted report artifact")
 		}
 		id = a.ID
 	}
 	if id == 0 {
-		return nil, 0, errors.New("hosted report artifact unavailable")
+		return 0, errors.New("hosted report artifact unavailable")
 	}
-	files, err := c.downloadZIP(ctx, id)
+	return id, nil
+}
+
+func (c client) reportArtifact(ctx context.Context, r workflowRun, suite string) (map[string][]byte, int64, error) {
+	id, err := c.artifactID(ctx, r, fmt.Sprintf("sofa-e2e-report-%s-%d-%d", suite, r.ID, r.RunAttempt))
+	if err != nil {
+		return nil, 0, err
+	}
+	files, err := c.downloadZIP(ctx, id, false)
 	return files, id, err
 }
 
-func (c client) downloadZIP(ctx context.Context, artifactID int64) (map[string][]byte, error) {
+func (c client) denialArtifact(ctx context.Context, r workflowRun, suite string) ([]byte, int64, error) {
+	id, err := c.artifactID(ctx, r, fmt.Sprintf("sofa-e2e-denial-%s-%d-%d", suite, r.ID, r.RunAttempt))
+	if err != nil {
+		return nil, 0, err
+	}
+	files, err := c.downloadZIP(ctx, id, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	return files["report/denial.json"], id, nil
+}
+
+func (c client) downloadZIP(ctx context.Context, artifactID int64, denial bool) (map[string][]byte, error) {
 	path := fmt.Sprintf("/repos/%s/actions/artifacts/%d/zip", consumerRepo, artifactID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
@@ -339,19 +369,25 @@ func (c client) downloadZIP(ctx context.Context, artifactID int64) (map[string][
 	if err != nil || len(zipBytes) > maxArtifactZip {
 		return nil, errors.New("hosted artifact ZIP too large")
 	}
+	if denial {
+		return unpackZIPExpected(zipBytes, map[string]bool{"report/denial.json": true})
+	}
 	return unpackZIP(zipBytes)
 }
 
 func unpackZIP(data []byte) (map[string][]byte, error) {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil || len(zr.File) > 16 {
-		return nil, errors.New("invalid or oversized hosted artifact ZIP")
-	}
-	want := map[string]bool{
+	return unpackZIPExpected(data, map[string]bool{
 		"transport/identity.json": true, "transport/manifest.json": true,
 		"candidate/execution.json": true, "candidate/bundle.json": true,
 		"evidence/checks.json": true, "report/publication.json": true,
 		"report/scenario.json": true,
+	})
+}
+
+func unpackZIPExpected(data []byte, want map[string]bool) (map[string][]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil || len(zr.File) > 16 {
+		return nil, errors.New("invalid or oversized hosted artifact ZIP")
 	}
 	out := make(map[string][]byte, len(want))
 	total := uint64(0)
@@ -442,6 +478,49 @@ type validated struct {
 	report  report
 	bundle  bundle
 	content []byte
+}
+
+type denialReport struct {
+	SchemaVersion      int      `json:"schema_version"`
+	SuiteID            string   `json:"suite_id"`
+	Scenario           string   `json:"scenario"`
+	DenialKind         string   `json:"denial_kind"`
+	Decision           string   `json:"decision"`
+	CandidateSHA       string   `json:"candidate_sha"`
+	PRBaseSHA          string   `json:"pr_base_sha"`
+	DisposableBaseSHA  string   `json:"disposable_base_sha"`
+	RunID              string   `json:"run_id"`
+	RunAttempt         int      `json:"run_attempt"`
+	SkippedJobs        []string `json:"skipped_jobs"`
+	FakePromptRequests int      `json:"fake_prompt_requests"`
+	ProviderRequests   int      `json:"provider_requests"`
+	PublicationWrites  int      `json:"publication_writes"`
+	WriteCredentials   int      `json:"write_credentials"`
+}
+
+type denialEvidence struct {
+	Kind        string `json:"kind"`
+	SuiteID     string `json:"suite_id"`
+	Decision    string `json:"decision"`
+	ArtifactID  int64  `json:"artifact_id"`
+	ArtifactURL string `json:"artifact_url"`
+}
+
+func validateDenialArtifact(data []byte, p pull, r workflowRun, mainSHA, kind string) error {
+	var d denialReport
+	if err := decodeStrict(data, &d); err != nil {
+		return err
+	}
+	decision := map[string]string{"non-ready": "admission-denied", "completed-redelivery": "already-completed"}[kind]
+	if decision == "" || d.SchemaVersion != 1 || d.SuiteID != denialSuiteID(p, mainSHA, kind) ||
+		d.Scenario != "denied" || d.DenialKind != kind || d.Decision != decision ||
+		d.CandidateSHA != p.Head.SHA || d.PRBaseSHA != p.Base.SHA || d.DisposableBaseSHA != mainSHA ||
+		d.RunID != strconv.FormatInt(r.ID, 10) || d.RunAttempt != r.RunAttempt ||
+		len(d.SkippedJobs) != 3 || d.SkippedJobs[0] != "execute" || d.SkippedJobs[1] != "verify" || d.SkippedJobs[2] != "publish" ||
+		d.FakePromptRequests != 0 || d.ProviderRequests != 0 || d.PublicationWrites != 0 || d.WriteCredentials != 0 {
+		return errors.New("hosted denial report does not match exact suite")
+	}
+	return nil
 }
 
 func decodeStrict(data []byte, out any) error {
@@ -874,6 +953,19 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil {
 		return err
 	}
+	denials := make([]denialEvidence, 0, 2)
+	for _, kind := range []string{"non-ready", "completed-redelivery"} {
+		denialSuite := denialSuiteID(p, mainSHA, kind)
+		data, id, err := c.denialArtifact(ctx, r, denialSuite)
+		if err != nil {
+			return fmt.Errorf("%s denial artifact: %w", kind, err)
+		}
+		if err := validateDenialArtifact(data, p, r, mainSHA, kind); err != nil {
+			return fmt.Errorf("%s denial artifact: %w", kind, err)
+		}
+		decision := map[string]string{"non-ready": "admission-denied", "completed-redelivery": "already-completed"}[kind]
+		denials = append(denials, denialEvidence{kind, denialSuite, decision, id, fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, r.ID, id)})
+	}
 	current, err := c.currentPR(ctx, p.Number)
 	if err != nil || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
 		return errors.New("sofa PR changed before fixture publication")
@@ -891,36 +983,37 @@ func (c client) observe(ctx context.Context, p pull) error {
 		// timestamps, and canonical links. Never copy candidate artifact content,
 		// logs, credentials, or environment values into the status handoff.
 		result := struct {
-			SchemaVersion         int       `json:"schema_version"`
-			SofaPR                int       `json:"sofa_pr"`
-			CandidateSHA          string    `json:"candidate_sha"`
-			PRBaseSHA             string    `json:"pr_base_sha"`
-			DisposableBaseSHA     string    `json:"disposable_base_sha"`
-			SuiteID               string    `json:"suite_id"`
-			CandidateDigest       string    `json:"candidate_digest"`
-			CandidateRunID        int64     `json:"candidate_run_id"`
-			CandidateRunAttempt   int       `json:"candidate_run_attempt"`
-			CandidateRunURL       string    `json:"candidate_run_url"`
-			CandidateRunStartedAt time.Time `json:"candidate_run_started_at"`
-			CandidateRunUpdatedAt time.Time `json:"candidate_run_updated_at"`
-			CandidateDurationMS   int64     `json:"candidate_duration_ms"`
-			ReportArtifactID      int64     `json:"report_artifact_id"`
-			ReportArtifactURL     string    `json:"report_artifact_url"`
-			DraftPR               int       `json:"draft_pr"`
-			DraftPRURL            string    `json:"draft_pr_url"`
-			DraftHeadSHA          string    `json:"draft_head_sha"`
-			DraftHeadRef          string    `json:"draft_head_ref"`
-			DraftBaseRef          string    `json:"draft_base_ref"`
-			DraftState            string    `json:"draft_state"`
-			DraftIsDraft          bool      `json:"draft_is_draft"`
-			OwnedResourceState    string    `json:"owned_resource_cleanup_state"`
+			SchemaVersion         int              `json:"schema_version"`
+			SofaPR                int              `json:"sofa_pr"`
+			CandidateSHA          string           `json:"candidate_sha"`
+			PRBaseSHA             string           `json:"pr_base_sha"`
+			DisposableBaseSHA     string           `json:"disposable_base_sha"`
+			SuiteID               string           `json:"suite_id"`
+			CandidateDigest       string           `json:"candidate_digest"`
+			CandidateRunID        int64            `json:"candidate_run_id"`
+			CandidateRunAttempt   int              `json:"candidate_run_attempt"`
+			CandidateRunURL       string           `json:"candidate_run_url"`
+			CandidateRunStartedAt time.Time        `json:"candidate_run_started_at"`
+			CandidateRunUpdatedAt time.Time        `json:"candidate_run_updated_at"`
+			CandidateDurationMS   int64            `json:"candidate_duration_ms"`
+			ReportArtifactID      int64            `json:"report_artifact_id"`
+			ReportArtifactURL     string           `json:"report_artifact_url"`
+			Denials               []denialEvidence `json:"denials"`
+			DraftPR               int              `json:"draft_pr"`
+			DraftPRURL            string           `json:"draft_pr_url"`
+			DraftHeadSHA          string           `json:"draft_head_sha"`
+			DraftHeadRef          string           `json:"draft_head_ref"`
+			DraftBaseRef          string           `json:"draft_base_ref"`
+			DraftState            string           `json:"draft_state"`
+			DraftIsDraft          bool             `json:"draft_is_draft"`
+			OwnedResourceState    string           `json:"owned_resource_cleanup_state"`
 		}{
-			SchemaVersion: 2, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
+			SchemaVersion: 3, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
 			DisposableBaseSHA: mainSHA, SuiteID: suite, CandidateDigest: v.bundle.CandidateDigest,
 			CandidateRunID: r.ID, CandidateRunAttempt: r.RunAttempt,
 			CandidateRunURL:       fmt.Sprintf("https://github.com/%s/actions/runs/%d", consumerRepo, r.ID),
 			CandidateRunStartedAt: r.StartedAt, CandidateRunUpdatedAt: r.UpdatedAt,
-			CandidateDurationMS: durationMS, ReportArtifactID: artifactID,
+			CandidateDurationMS: durationMS, ReportArtifactID: artifactID, Denials: denials,
 			ReportArtifactURL: fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, r.ID, artifactID),
 			DraftPR:           pr.Number, DraftPRURL: pr.HTMLURL, DraftHeadSHA: pr.Head.SHA,
 			DraftHeadRef: pr.Head.Ref, DraftBaseRef: pr.Base.Ref, DraftState: pr.State,
@@ -968,7 +1061,35 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
-`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
+  deny-non-ready:
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
+    with:
+      suite_id: %s
+      scenario: denied
+      denial_kind: non-ready
+      candidate_sha: %s
+      base_sha: %s
+      disposable_base_sha: %s
+      reconcile_candidate: false
+  deny-completed-redelivery:
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
+    with:
+      suite_id: %s
+      scenario: denied
+      denial_kind: completed-redelivery
+      candidate_sha: %s
+      base_sha: %s
+      disposable_base_sha: %s
+      reconcile_candidate: false
+`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase,
+		p.Head.SHA, denialSuiteID(p, consumerBase, "non-ready"), p.Head.SHA, p.Base.SHA, consumerBase,
+		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase)
 }
 
 func run(ctx context.Context, c client) error {
