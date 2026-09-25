@@ -1,0 +1,67 @@
+name: sofa hosted E2E manual cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      sofa_pr: {description: 'Original sofa PR number', type: string, required: true}
+      candidate_sha: {description: 'Original sofa candidate SHA', type: string, required: true}
+      pr_base_sha: {description: 'Original sofa PR base SHA', type: string, required: true}
+      disposable_base_sha: {description: 'Suite disposable base SHA', type: string, required: true}
+      caller_sha: {description: 'Exact caller branch head SHA', type: string, required: true}
+      result_sha: {description: 'Exact result branch head SHA', type: string, required: true}
+      candidate_digest: {description: 'Verified candidate digest', type: string, required: true}
+      draft_pr: {description: 'Disposable draft PR number', type: string, required: true}
+      apply: {description: 'Close PR and remove refs after verification', type: boolean, required: false, default: false}
+
+permissions: {}
+
+concurrency:
+  group: sofa-gate-coordinator
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main' && github.event.repository.fork == false
+    environment: sofa-gate-coordinator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted disposable default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify superseded suite and optionally clean it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOFA_PUBLISH_TOKEN: ${{ inputs.apply && secrets.SOFA_PUBLISH_TOKEN || '' }}
+          CLEANUP_SOFA_PR: ${{ inputs.sofa_pr }}
+          CLEANUP_CANDIDATE: ${{ inputs.candidate_sha }}
+          CLEANUP_PR_BASE: ${{ inputs.pr_base_sha }}
+          CLEANUP_DISPOSABLE_BASE: ${{ inputs.disposable_base_sha }}
+          CLEANUP_CALLER: ${{ inputs.caller_sha }}
+          CLEANUP_RESULT: ${{ inputs.result_sha }}
+          CLEANUP_DIGEST: ${{ inputs.candidate_digest }}
+          CLEANUP_DRAFT_PR: ${{ inputs.draft_pr }}
+          CLEANUP_APPLY: ${{ inputs.apply }}
+        run: |
+          args=(
+            --sofa-pr "$CLEANUP_SOFA_PR"
+            --candidate-sha "$CLEANUP_CANDIDATE"
+            --pr-base-sha "$CLEANUP_PR_BASE"
+            --disposable-base-sha "$CLEANUP_DISPOSABLE_BASE"
+            --caller-sha "$CLEANUP_CALLER"
+            --result-sha "$CLEANUP_RESULT"
+            --candidate-digest "$CLEANUP_DIGEST"
+            --draft-pr "$CLEANUP_DRAFT_PR"
+          )
+          if [ "$CLEANUP_APPLY" = true ]; then args+=(--apply); fi
+          go run ./cmd/sofa-gate-cleanup "${args[@]}"
