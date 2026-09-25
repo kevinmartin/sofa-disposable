@@ -73,13 +73,16 @@ type content struct {
 }
 
 type runList struct {
-	TotalCount int `json:"total_count"`
-	Runs       []struct {
-		ID         int64  `json:"id"`
-		HeadBranch string `json:"head_branch"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	} `json:"workflow_runs"`
+	TotalCount int           `json:"total_count"`
+	Runs       []workflowRun `json:"workflow_runs"`
+}
+
+type workflowRun struct {
+	ID         int64     `json:"id"`
+	HeadBranch string    `json:"head_branch"`
+	Status     string    `json:"status"`
+	Conclusion string    `json:"conclusion"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type apiError struct{ status int }
@@ -277,8 +280,12 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	if err := a.get(ctx, path, &runs); err != nil {
 		return err
 	}
-	if runs.TotalCount > 0 {
-		fmt.Printf("suite %s already has %d hosted run(s)\n", strings.TrimPrefix(branch, "sofa-e2e/"), runs.TotalCount)
+	dispatch, err := shouldDispatch(runs, branch, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if !dispatch {
+		fmt.Printf("suite %s already has an active or passing hosted run\n", strings.TrimPrefix(branch, "sofa-e2e/"))
 		return nil
 	}
 	// Re-read after branch creation; changed base/head cannot dispatch the old suite.
@@ -309,6 +316,50 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 		fmt.Printf("dispatched suite %s on %s\n", strings.TrimPrefix(branch, "sofa-e2e/"), branch)
 	}
 	return err
+}
+
+// A failed or cancelled Actions run can be retried only within the original
+// suite's finite time and dispatch budget. Successful or active runs never
+// dispatch a duplicate. The observer separately insists on a successful
+// latest run and never treats a failed or missing run as green.
+func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
+	if list.TotalCount < 0 || list.TotalCount > 8 || len(list.Runs) != list.TotalCount {
+		return false, errors.New("hosted suite dispatch limit or run listing invalid")
+	}
+	if list.TotalCount == 0 {
+		return true, nil
+	}
+	var newest workflowRun
+	oldest := now
+	for _, r := range list.Runs {
+		if r.ID < 1 || r.HeadBranch != branch || r.CreatedAt.IsZero() || r.CreatedAt.After(now.Add(time.Minute)) {
+			return false, errors.New("hosted suite run identity invalid")
+		}
+		if r.CreatedAt.Before(oldest) {
+			oldest = r.CreatedAt
+		}
+		if newest.ID == 0 || r.CreatedAt.After(newest.CreatedAt) {
+			newest = r
+		}
+	}
+	if newest.Status != "completed" {
+		for _, active := range []string{"queued", "in_progress", "waiting", "requested", "pending"} {
+			if newest.Status == active {
+				return false, nil
+			}
+		}
+		return false, errors.New("unknown hosted suite run state")
+	}
+	if newest.Conclusion == "success" {
+		return false, nil
+	}
+	if newest.Conclusion != "failure" && newest.Conclusion != "cancelled" && newest.Conclusion != "timed_out" {
+		return false, errors.New("hosted suite run outcome needs inspection")
+	}
+	if list.TotalCount >= 8 || now.Sub(oldest) >= 45*time.Minute {
+		return false, errors.New("hosted suite retry budget exhausted")
+	}
+	return true, nil
 }
 
 func run(ctx context.Context, a api) error {

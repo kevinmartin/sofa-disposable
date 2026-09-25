@@ -222,6 +222,9 @@ func TestExistingDraftReconcilesWithoutWrite(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/contents/"):
 			body = fmt.Sprintf(`{"encoding":"base64","content":%q}`, base64.StdEncoding.EncodeToString(formatted))
 		case strings.Contains(r.URL.Path, "/pulls"):
+			if got := r.URL.Query().Get("head"); got != "kevinmartin:"+branch {
+				t.Fatalf("draft lookup used invalid GitHub head filter %q", got)
+			}
 			body = fmt.Sprintf(`[{"number":7,"draft":true,"state":"open","html_url":"https://github.com/%s/pull/7","head":{"ref":%q,"sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}]`, consumerRepo, branch, branchSHA, consumerRepo)
 		default:
 			t.Errorf("unexpected read %s", r.URL.Path)
