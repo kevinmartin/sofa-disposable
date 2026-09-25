@@ -345,7 +345,7 @@ func (c client) denialArtifact(ctx context.Context, r workflowRun, suite string)
 	if err != nil {
 		return nil, 0, err
 	}
-	return files["report/denial.json"], id, nil
+	return files["denial.json"], id, nil
 }
 
 func (c client) downloadZIP(ctx context.Context, artifactID int64, denial bool) (map[string][]byte, error) {
@@ -370,7 +370,9 @@ func (c client) downloadZIP(ctx context.Context, artifactID int64, denial bool) 
 		return nil, errors.New("hosted artifact ZIP too large")
 	}
 	if denial {
-		return unpackZIPExpected(zipBytes, map[string]bool{"report/denial.json": true})
+		// upload-artifact strips the shared report/ prefix when the upload
+		// path names a single file. The hosted archive contains denial.json.
+		return unpackZIPExpected(zipBytes, map[string]bool{"denial.json": true})
 	}
 	return unpackZIP(zipBytes)
 }
