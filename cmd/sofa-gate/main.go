@@ -31,11 +31,66 @@ const (
 
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var errRetryBudget = errors.New("hosted suite retry budget exhausted")
+var errNotReady = errors.New("sofa candidate test workflow unavailable")
 
 type api struct {
 	http          *http.Client
 	token         string
 	workflowToken string
+	status        gateStatus
+}
+
+type gateStatus interface {
+	Latest(context.Context, string) (gatestatus.Snapshot, error)
+	Publish(context.Context, gatestatus.Result) error
+}
+
+func (a api) statusWriter() gateStatus {
+	if a.status != nil {
+		return a.status
+	}
+	return gatestatus.Writer{Client: a.http, AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")}
+}
+
+func coordinatorRunURL() string {
+	return fmt.Sprintf("https://github.com/%s/actions/runs/%s", disposableRepo, os.Getenv("GITHUB_RUN_ID"))
+}
+
+func suiteDescription(suite string, state gatestatus.State) string {
+	return fmt.Sprintf("Hosted E2E %s %s", suite, state)
+}
+
+func (a api) publishPending(ctx context.Context, p pull, suite, runURL string) error {
+	return a.statusWriter().Publish(ctx, gatestatus.Result{
+		PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
+		State: gatestatus.Pending, RunURL: runURL, Description: suiteDescription(suite, gatestatus.Pending),
+	})
+}
+
+func (a api) publishFailure(ctx context.Context, p pull, description, runURL string) error {
+	current, err := a.statusWriter().Latest(ctx, p.Head.SHA)
+	if err == nil && current.Found && current.Source && current.State == gatestatus.Failure && current.Description == description {
+		return nil
+	}
+	return a.statusWriter().Publish(ctx, gatestatus.Result{
+		PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
+		State: gatestatus.Failure, RunURL: runURL, Description: description,
+	})
+}
+
+func (a api) reconcileStatus(ctx context.Context, p pull, suite string) error {
+	status, err := a.statusWriter().Latest(ctx, p.Head.SHA)
+	if err != nil {
+		if publishErr := a.publishPending(ctx, p, suite, coordinatorRunURL()); publishErr != nil {
+			return fmt.Errorf("inspect exact sofa gate status (%v) and mark pending: %w", err, publishErr)
+		}
+		return nil
+	}
+	if status.Found && status.Source && status.Description == suiteDescription(suite, status.State) &&
+		(status.State == gatestatus.Pending || status.State == gatestatus.Success || status.State == gatestatus.Failure) {
+		return nil
+	}
+	return a.publishPending(ctx, p, suite, coordinatorRunURL())
 }
 
 type pull struct {
@@ -221,32 +276,41 @@ func (a api) branch(ctx context.Context, name string) (ref, bool, error) {
 }
 
 func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
+	return a.ensureBranchGuarded(ctx, p, nil)
+}
+
+func (a api) ensureBranchGuarded(ctx context.Context, p pull, guard func(context.Context, pull, string) error) (string, error) {
 	mainRef, ok, err := a.branch(ctx, "main")
 	if err != nil || !ok || !shaPattern.MatchString(mainRef.Object.SHA) {
 		return "", errors.New("disposable main identity unavailable")
 	}
 	name := "sofa-e2e/" + suiteID(p, mainRef.Object.SHA)
+	if guard != nil {
+		if err := guard(ctx, p, suiteID(p, mainRef.Object.SHA)); err != nil {
+			return name, err
+		}
+	}
 	want := branchWorkflow(p, mainRef.Object.SHA)
 	if existing, exists, err := a.branch(ctx, name); err != nil {
-		return "", err
+		return name, err
 	} else if exists {
 		if !shaPattern.MatchString(existing.Object.SHA) {
-			return "", errors.New("owned branch SHA invalid")
+			return name, errors.New("owned branch SHA invalid")
 		}
 		var file content
 		path := "/repos/" + disposableRepo + "/contents/" + workflowPath + "?ref=" + url.QueryEscape(name)
 		if err := a.get(ctx, path, &file); err != nil || file.Encoding != "base64" {
-			return "", errors.New("owned branch workflow unavailable")
+			return name, errors.New("owned branch workflow unavailable")
 		}
 		actual, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
 		if err != nil || string(actual) != want {
-			return "", errors.New("owned branch workflow differs from exact suite")
+			return name, errors.New("owned branch workflow differs from exact suite")
 		}
 		return name, nil
 	}
 	var base commit
 	if err := a.get(ctx, "/repos/"+disposableRepo+"/git/commits/"+mainRef.Object.SHA, &base); err != nil || !shaPattern.MatchString(base.Tree.SHA) {
-		return "", errors.New("disposable base tree unavailable")
+		return name, errors.New("disposable base tree unavailable")
 	}
 	var tree struct {
 		SHA string `json:"sha"`
@@ -255,9 +319,9 @@ func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
 		"base_tree": base.Tree.SHA,
 		"tree":      []map[string]any{{"path": workflowPath, "mode": "100644", "type": "blob", "content": want}},
 	}, &tree); err != nil {
-		return "", fmt.Errorf("cannot create suite workflow tree: %w", err)
+		return name, fmt.Errorf("cannot create suite workflow tree: %w", err)
 	} else if !shaPattern.MatchString(tree.SHA) {
-		return "", errors.New("invalid suite workflow tree")
+		return name, errors.New("invalid suite workflow tree")
 	}
 	var made commit
 	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/commits", map[string]any{
@@ -265,12 +329,12 @@ func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
 		"tree":    tree.SHA,
 		"parents": []string{mainRef.Object.SHA},
 	}, &made); err != nil {
-		return "", fmt.Errorf("cannot create suite workflow commit: %w", err)
+		return name, fmt.Errorf("cannot create suite workflow commit: %w", err)
 	} else if !shaPattern.MatchString(made.SHA) {
-		return "", errors.New("invalid suite workflow commit")
+		return name, errors.New("invalid suite workflow commit")
 	}
 	if err := a.postWorkflow(ctx, "/repos/"+disposableRepo+"/git/refs", map[string]any{"ref": "refs/heads/" + name, "sha": made.SHA}, nil); err != nil {
-		return "", fmt.Errorf("cannot create suite workflow ref: %w", err)
+		return name, fmt.Errorf("cannot create suite workflow ref: %w", err)
 	}
 	return name, nil
 }
@@ -283,9 +347,28 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	}
 	dispatch, err := shouldDispatch(runs, branch, time.Now().UTC())
 	if err != nil {
+		if errors.Is(err, errRetryBudget) {
+			runURL := coordinatorRunURL()
+			if newest := newestRun(runs); newest.ID > 0 {
+				runURL = fmt.Sprintf("https://github.com/%s/actions/runs/%d", disposableRepo, newest.ID)
+			}
+			if publishErr := a.publishFailure(ctx, p, suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Failure), runURL); publishErr != nil {
+				return fmt.Errorf("hosted retry budget exhausted and failure status unavailable: %w", publishErr)
+			}
+		}
 		return err
 	}
 	if !dispatch {
+		newest := newestRun(runs)
+		if newest.Status != "completed" {
+			suite := strings.TrimPrefix(branch, "sofa-e2e/")
+			status, err := a.statusWriter().Latest(ctx, p.Head.SHA)
+			if err != nil || !status.Found || !status.Source || status.Description != suiteDescription(suite, status.State) || status.State == gatestatus.Success {
+				if err := a.publishPending(ctx, p, suite, fmt.Sprintf("https://github.com/%s/actions/runs/%d", disposableRepo, newest.ID)); err != nil {
+					return fmt.Errorf("mark active sofa suite pending: %w", err)
+				}
+			}
+		}
 		fmt.Printf("suite %s already has an active or passing hosted run\n", strings.TrimPrefix(branch, "sofa-e2e/"))
 		return nil
 	}
@@ -294,20 +377,11 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	if err != nil || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
 		return errors.New("sofa PR changed before dispatch")
 	}
-	appID, appKey := os.Getenv("SOFA_GATE_APP_ID"), os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")
-	if (appID == "") != (appKey == "") {
-		return errors.New("incomplete sofa gate App credential")
-	}
-	if appID != "" {
-		writer := gatestatus.Writer{Client: a.http, AppID: appID, PrivateKeyPEM: appKey}
-		if err := writer.Publish(ctx, gatestatus.Result{
-			PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
-			State:       gatestatus.Pending,
-			RunURL:      fmt.Sprintf("https://github.com/%s/actions/runs/%s", disposableRepo, os.Getenv("GITHUB_RUN_ID")),
-			Description: "Hosted fake ACP E2E queued for exact revision",
-		}); err != nil {
-			return fmt.Errorf("mark exact sofa revision pending: %w", err)
-		}
+	if err := a.statusWriter().Publish(ctx, gatestatus.Result{
+		PRNumber: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA,
+		State: gatestatus.Pending, RunURL: coordinatorRunURL(), Description: suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Pending),
+	}); err != nil {
+		return fmt.Errorf("mark exact sofa revision pending: %w", err)
 	}
 	err = a.post(ctx, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", map[string]any{
 		"ref":    branch,
@@ -325,7 +399,10 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 // latest run and never treats a failed or missing run as green.
 func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
 	if list.TotalCount > 8 {
-		return false, errRetryBudget
+		if len(list.Runs) != 8 {
+			return false, errors.New("hosted suite run listing invalid")
+		}
+		return shouldDispatch(runList{TotalCount: 8, Runs: list.Runs}, branch, now)
 	}
 	if list.TotalCount < 0 || len(list.Runs) != list.TotalCount {
 		return false, errors.New("hosted suite run listing invalid")
@@ -333,7 +410,7 @@ func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
 	if list.TotalCount == 0 {
 		return true, nil
 	}
-	var newest workflowRun
+	newest := newestRun(list)
 	oldest := now
 	for _, r := range list.Runs {
 		if r.ID < 1 || r.HeadBranch != branch || r.CreatedAt.IsZero() || r.CreatedAt.After(now.Add(time.Minute)) {
@@ -341,9 +418,6 @@ func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
 		}
 		if r.CreatedAt.Before(oldest) {
 			oldest = r.CreatedAt
-		}
-		if newest.ID == 0 || r.CreatedAt.After(newest.CreatedAt) {
-			newest = r
 		}
 	}
 	if newest.Status != "completed" {
@@ -364,6 +438,16 @@ func shouldDispatch(list runList, branch string, now time.Time) (bool, error) {
 		return false, errRetryBudget
 	}
 	return true, nil
+}
+
+func newestRun(list runList) workflowRun {
+	var newest workflowRun
+	for _, r := range list.Runs {
+		if newest.ID == 0 || r.CreatedAt.After(newest.CreatedAt) || (r.CreatedAt.Equal(newest.CreatedAt) && r.ID > newest.ID) {
+			newest = r
+		}
+	}
+	return newest
 }
 
 func run(ctx context.Context, a api) error {
@@ -403,16 +487,31 @@ func run(ctx context.Context, a api) error {
 		if p.Head.SHA != listed.Head.SHA || p.Base.SHA != listed.Base.SHA {
 			return errors.New("PR changed during discovery")
 		}
-		ready, err := a.checkCandidate(ctx, p)
-		if err != nil {
-			return err
-		}
-		if !ready {
+		branch, err := a.ensureBranchGuarded(ctx, p, func(ctx context.Context, p pull, suite string) error {
+			if err := a.reconcileStatus(ctx, p, suite); err != nil {
+				return err
+			}
+			ready, err := a.checkCandidate(ctx, p)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				return errNotReady
+			}
+			return nil
+		})
+		if errors.Is(err, errNotReady) {
 			fmt.Printf("PR %d has no candidate test workflow; awaiting rollout\n", p.Number)
 			continue
 		}
-		branch, err := a.ensureBranch(ctx, p)
 		if err != nil {
+			description := "Hosted E2E coordinator failure"
+			if branch != "" {
+				description = suiteDescription(strings.TrimPrefix(branch, "sofa-e2e/"), gatestatus.Failure)
+			}
+			if publishErr := a.publishFailure(ctx, p, description, coordinatorRunURL()); publishErr != nil {
+				return fmt.Errorf("suite preparation failed (%v) and failure status unavailable: %w", err, publishErr)
+			}
 			return err
 		}
 		if err := a.dispatchOnce(ctx, p, branch); err != nil {

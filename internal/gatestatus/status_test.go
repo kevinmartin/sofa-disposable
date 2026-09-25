@@ -207,3 +207,87 @@ func TestRejectsInvalidStatusSourceBeforeNetwork(t *testing.T) {
 		})
 	}
 }
+
+func TestLatestRequiresAuthenticatedAppAndNewestMatchingContext(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statuses   string
+		wantFound  bool
+		wantSource bool
+		wantState  State
+	}{
+		{"current App", `[{"context":"other","state":"success"},{"context":"sofa / hosted-e2e","state":"success","description":"exact suite","creator":{"login":"sofa-gate[bot]","type":"Bot"}}]`, true, true, Success},
+		{"newer foreign status", `[{"context":"sofa / hosted-e2e","state":"success","description":"forged","creator":{"login":"other[bot]","type":"Bot"}},{"context":"sofa / hosted-e2e","state":"success","description":"exact suite","creator":{"login":"sofa-gate[bot]","type":"Bot"}}]`, true, false, Success},
+		{"no gate status", `[{"context":"other","state":"success"}]`, false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/app":
+					if !strings.HasPrefix(req.Header.Get("Authorization"), "Bearer eyJ") {
+						t.Fatal("App identity was not requested with signed JWT")
+					}
+					return response(200, `{"id":123,"slug":"sofa-gate"}`), nil
+				case "/repos/kevinmartin/sofa/commits/" + headSHA + "/statuses":
+					if req.URL.Query().Get("per_page") != "100" || req.Header.Get("Authorization") != "Bearer read-token" {
+						t.Fatal("status read used unexpected scope")
+					}
+					return response(200, tc.statuses), nil
+				default:
+					t.Fatalf("unexpected request %s", req.URL.Path)
+					return nil, nil
+				}
+			})}
+			w := Writer{Client: client, AppID: "123", PrivateKeyPEM: appKey(t), ReadToken: "read-token"}
+			got, err := w.Latest(context.Background(), headSHA)
+			if err != nil || got.Found != tc.wantFound || got.Source != tc.wantSource || got.State != tc.wantState {
+				t.Fatalf("latest status = %+v, err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestLatestFailsClosedOnIdentityOrReadError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		appBody   string
+		readCode  int
+		readCalls int
+	}{
+		{"wrong App ID", `{"id":999,"slug":"sofa-gate"}`, 200, 0},
+		{"status read unavailable", `{"id":123,"slug":"sofa-gate"}`, 503, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := 0
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/app" {
+					return response(200, tc.appBody), nil
+				}
+				reads++
+				return response(tc.readCode, `[]`), nil
+			})}
+			w := Writer{Client: client, AppID: "123", PrivateKeyPEM: appKey(t)}
+			if _, err := w.Latest(context.Background(), headSHA); err == nil || reads != tc.readCalls {
+				t.Fatalf("untrusted status read was accepted: reads=%d err=%v", reads, err)
+			}
+		})
+	}
+}
+
+func TestLatestRejectsFullStatusPageWithoutGateContext(t *testing.T) {
+	statuses := make([]map[string]string, 100)
+	for i := range statuses {
+		statuses[i] = map[string]string{"context": "unrelated", "state": "success"}
+	}
+	page, _ := json.Marshal(statuses)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/app" {
+			return response(200, `{"id":123,"slug":"sofa-gate"}`), nil
+		}
+		return response(200, string(page)), nil
+	})}
+	w := Writer{Client: client, AppID: "123", PrivateKeyPEM: appKey(t)}
+	if _, err := w.Latest(context.Background(), headSHA); err == nil || !strings.Contains(err.Error(), "outside bounded page") {
+		t.Fatalf("ambiguous status page was accepted: %v", err)
+	}
+}
