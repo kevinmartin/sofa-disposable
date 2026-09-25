@@ -171,10 +171,12 @@ func TestCompletedRunSelectsNewestExactSuiteBeforeCheckingOutcome(t *testing.T) 
 	branch := "sofa-e2e/p2-test"
 	sha := strings.Repeat("a", 40)
 	start := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	older := workflowRun{ID: 41, Status: "completed", Conclusion: "success", Event: "workflow_dispatch", Path: workflowPath, HeadBranch: branch, HeadSHA: sha, RunAttempt: 1, CreatedAt: start}
+	older := workflowRun{ID: 41, Status: "completed", Conclusion: "success", Event: "workflow_dispatch", Path: workflowPath, HeadBranch: branch, HeadSHA: sha, RunAttempt: 1, CreatedAt: start, StartedAt: start.Add(time.Second), UpdatedAt: start.Add(time.Minute)}
 	newer := older
 	newer.ID = 42
 	newer.CreatedAt = start.Add(time.Minute)
+	newer.StartedAt = newer.CreatedAt.Add(time.Second)
+	newer.UpdatedAt = newer.CreatedAt.Add(time.Minute)
 	for _, tc := range []struct {
 		name  string
 		runs  []workflowRun
@@ -218,6 +220,78 @@ func TestCompletedRunSelectsNewestExactSuiteBeforeCheckingOutcome(t *testing.T) 
 			}
 			if calls != wantCalls {
 				t.Fatalf("unexpected request count: got %d, want %d", calls, wantCalls)
+			}
+		})
+	}
+}
+
+func TestHostedDurationRequiresMeasuredBoundedTimestamps(t *testing.T) {
+	start := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	valid := workflowRun{CreatedAt: start, StartedAt: start.Add(time.Second), UpdatedAt: start.Add(91 * time.Second)}
+	if got, err := hostedDuration(valid); err != nil || got != 90000 {
+		t.Fatalf("valid hosted duration = %d, %v", got, err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*workflowRun)
+	}{
+		{"missing start", func(r *workflowRun) { r.StartedAt = time.Time{} }},
+		{"start before creation", func(r *workflowRun) { r.StartedAt = start.Add(-time.Second) }},
+		{"zero duration", func(r *workflowRun) { r.UpdatedAt = r.StartedAt }},
+		{"reversed duration", func(r *workflowRun) { r.UpdatedAt = r.StartedAt.Add(-time.Second) }},
+		{"submillisecond duration", func(r *workflowRun) { r.UpdatedAt = r.StartedAt.Add(time.Microsecond) }},
+		{"over six hours", func(r *workflowRun) { r.UpdatedAt = r.StartedAt.Add(6*time.Hour + time.Millisecond) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := valid
+			tc.edit(&r)
+			if _, err := hostedDuration(r); err == nil {
+				t.Fatal("accepted invalid hosted duration")
+			}
+		})
+	}
+}
+
+func TestReportArtifactReturnsValidatedSourceID(t *testing.T) {
+	files, p, _, mainSHA, _ := testArtifacts(t)
+	var zipped bytes.Buffer
+	w := zip.NewWriter(&zipped)
+	for path, content := range files {
+		entry, err := w.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := workflowRun{ID: 42, RunAttempt: 1}
+	for _, sourceID := range []int64{42, 41} {
+		t.Run(fmt.Sprint(sourceID), func(t *testing.T) {
+			calls := 0
+			c := client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				var body []byte
+				switch {
+				case strings.HasSuffix(req.URL.Path, "/artifacts"):
+					body = []byte(fmt.Sprintf(`{"total_count":1,"artifacts":[{"id":77,"name":%q,"expired":false,"size_in_bytes":%d,"workflow_run":{"id":%d}}]}`, fmt.Sprintf("sofa-e2e-report-%s-42-1", suiteID(p, mainSHA)), zipped.Len(), sourceID))
+				case strings.HasSuffix(req.URL.Path, "/artifacts/77/zip"):
+					body = zipped.Bytes()
+				default:
+					t.Errorf("unexpected request %s", req.URL)
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header), Request: req}, nil
+			})}}
+			got, id, err := c.reportArtifact(context.Background(), r, suiteID(p, mainSHA))
+			if sourceID == r.ID {
+				if err != nil || id != 77 || len(got) != len(files) || calls != 2 {
+					t.Fatalf("valid artifact result: id=%d files=%d calls=%d err=%v", id, len(got), calls, err)
+				}
+			} else if err == nil || calls != 1 {
+				t.Fatalf("wrong source accepted: id=%d calls=%d err=%v", id, calls, err)
 			}
 		})
 	}

@@ -184,6 +184,23 @@ type workflowRun struct {
 	HeadSHA    string    `json:"head_sha"`
 	RunAttempt int       `json:"run_attempt"`
 	CreatedAt  time.Time `json:"created_at"`
+	StartedAt  time.Time `json:"run_started_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+const maxHostedRunDuration = 6 * time.Hour
+
+func hostedDuration(r workflowRun) (int64, error) {
+	if r.CreatedAt.IsZero() || r.StartedAt.IsZero() || r.UpdatedAt.IsZero() ||
+		r.StartedAt.Before(r.CreatedAt) || !r.UpdatedAt.After(r.StartedAt) ||
+		r.UpdatedAt.Sub(r.StartedAt) > maxHostedRunDuration {
+		return 0, errors.New("hosted run timestamps invalid")
+	}
+	ms := r.UpdatedAt.Sub(r.StartedAt).Milliseconds()
+	if ms < 1 {
+		return 0, errors.New("hosted run duration below reporting resolution")
+	}
+	return ms, nil
 }
 
 type runList struct {
@@ -241,6 +258,9 @@ func (c client) completedRun(ctx context.Context, branch, branchSHA string) (wor
 	if newest.ID == 0 || newest.RunAttempt != 1 || newest.Status != "completed" || newest.Conclusion != "success" {
 		return workflowRun{}, false, nil
 	}
+	if _, err := hostedDuration(newest); err != nil {
+		return workflowRun{}, false, err
+	}
 	var jobs jobList
 	if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", consumerRepo, newest.ID), &jobs); err != nil {
 		return workflowRun{}, false, err
@@ -270,13 +290,13 @@ func validJobs(j jobList) bool {
 	return true
 }
 
-func (c client) reportArtifact(ctx context.Context, r workflowRun, suite string) (map[string][]byte, error) {
+func (c client) reportArtifact(ctx context.Context, r workflowRun, suite string) (map[string][]byte, int64, error) {
 	var list artifactList
 	if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/artifacts?per_page=100", consumerRepo, r.ID), &list); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if list.TotalCount > 100 {
-		return nil, errors.New("suite has unbounded artifact history")
+	if list.TotalCount < 0 || list.TotalCount > 100 || len(list.Artifacts) != list.TotalCount {
+		return nil, 0, errors.New("suite artifact listing invalid or unbounded")
 	}
 	want := fmt.Sprintf("sofa-e2e-report-%s-%d-%d", suite, r.ID, r.RunAttempt)
 	var id int64
@@ -285,14 +305,15 @@ func (c client) reportArtifact(ctx context.Context, r workflowRun, suite string)
 			continue
 		}
 		if id != 0 || a.ID < 1 || a.RunSource.ID != r.ID || a.Expired || a.Size < 1 || a.Size > maxArtifactZip {
-			return nil, errors.New("ambiguous or invalid hosted report artifact")
+			return nil, 0, errors.New("ambiguous or invalid hosted report artifact")
 		}
 		id = a.ID
 	}
 	if id == 0 {
-		return nil, errors.New("hosted report artifact unavailable")
+		return nil, 0, errors.New("hosted report artifact unavailable")
 	}
-	return c.downloadZIP(ctx, id)
+	files, err := c.downloadZIP(ctx, id)
+	return files, id, err
 }
 
 func (c client) downloadZIP(ctx context.Context, artifactID int64) (map[string][]byte, error) {
@@ -727,7 +748,7 @@ func (c client) findDraft(ctx context.Context, branch, headSHA string) (draftPR,
 		return draftPR{}, false, nil
 	}
 	pr := prs[0]
-	if pr.Number < 1 || pr.Head.Ref != branch || pr.Head.SHA != headSHA || pr.Head.Repo.FullName != consumerRepo || pr.Base.Ref != "main" || !strings.HasPrefix(pr.HTMLURL, "https://github.com/"+consumerRepo+"/pull/") {
+	if pr.Number < 1 || pr.Head.Ref != branch || pr.Head.SHA != headSHA || pr.Head.Repo.FullName != consumerRepo || pr.Base.Ref != "main" || pr.HTMLURL != fmt.Sprintf("https://github.com/%s/pull/%d", consumerRepo, pr.Number) {
 		return draftPR{}, false, errors.New("existing fixture PR does not match published candidate")
 	}
 	if pr.State != "open" || !pr.Draft {
@@ -811,7 +832,7 @@ func (c client) publish(ctx context.Context, p pull, mainSHA string, v validated
 		}
 		return draftPR{}, err
 	}
-	if created.Number < 1 || !created.Draft || created.State != "open" || created.Head.Ref != branch || created.Head.SHA != branchSHA || created.Head.Repo.FullName != consumerRepo || created.Base.Ref != "main" {
+	if created.Number < 1 || !created.Draft || created.State != "open" || created.Head.Ref != branch || created.Head.SHA != branchSHA || created.Head.Repo.FullName != consumerRepo || created.Base.Ref != "main" || created.HTMLURL != fmt.Sprintf("https://github.com/%s/pull/%d", consumerRepo, created.Number) {
 		return draftPR{}, errors.New("created fixture PR does not match exact candidate")
 	}
 	return created, nil
@@ -839,7 +860,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil || !ready {
 		return err
 	}
-	files, err := c.reportArtifact(ctx, r, suite)
+	files, artifactID, err := c.reportArtifact(ctx, r, suite)
 	if err != nil {
 		return err
 	}
@@ -860,20 +881,49 @@ func (c client) observe(ctx context.Context, p pull) error {
 		return err
 	}
 	if out := os.Getenv("SOFA_GATE_RESULT_PATH"); out != "" {
+		durationMS, err := hostedDuration(r)
+		if err != nil {
+			return err
+		}
+		// This trusted result carries only bounded GitHub identities, hashes,
+		// timestamps, and canonical links. Never copy candidate artifact content,
+		// logs, credentials, or environment values into the status handoff.
 		result := struct {
-			SchemaVersion       int    `json:"schema_version"`
-			SofaPR              int    `json:"sofa_pr"`
-			CandidateSHA        string `json:"candidate_sha"`
-			PRBaseSHA           string `json:"pr_base_sha"`
-			DisposableBaseSHA   string `json:"disposable_base_sha"`
-			SuiteID             string `json:"suite_id"`
-			CandidateDigest     string `json:"candidate_digest"`
-			CandidateRunID      int64  `json:"candidate_run_id"`
-			CandidateRunAttempt int    `json:"candidate_run_attempt"`
-			DraftPR             int    `json:"draft_pr"`
-			DraftPRURL          string `json:"draft_pr_url"`
-			DraftHeadSHA        string `json:"draft_head_sha"`
-		}{1, p.Number, p.Head.SHA, p.Base.SHA, mainSHA, suite, v.bundle.CandidateDigest, r.ID, r.RunAttempt, pr.Number, pr.HTMLURL, pr.Head.SHA}
+			SchemaVersion         int       `json:"schema_version"`
+			SofaPR                int       `json:"sofa_pr"`
+			CandidateSHA          string    `json:"candidate_sha"`
+			PRBaseSHA             string    `json:"pr_base_sha"`
+			DisposableBaseSHA     string    `json:"disposable_base_sha"`
+			SuiteID               string    `json:"suite_id"`
+			CandidateDigest       string    `json:"candidate_digest"`
+			CandidateRunID        int64     `json:"candidate_run_id"`
+			CandidateRunAttempt   int       `json:"candidate_run_attempt"`
+			CandidateRunURL       string    `json:"candidate_run_url"`
+			CandidateRunStartedAt time.Time `json:"candidate_run_started_at"`
+			CandidateRunUpdatedAt time.Time `json:"candidate_run_updated_at"`
+			CandidateDurationMS   int64     `json:"candidate_duration_ms"`
+			ReportArtifactID      int64     `json:"report_artifact_id"`
+			ReportArtifactURL     string    `json:"report_artifact_url"`
+			DraftPR               int       `json:"draft_pr"`
+			DraftPRURL            string    `json:"draft_pr_url"`
+			DraftHeadSHA          string    `json:"draft_head_sha"`
+			DraftHeadRef          string    `json:"draft_head_ref"`
+			DraftBaseRef          string    `json:"draft_base_ref"`
+			DraftState            string    `json:"draft_state"`
+			DraftIsDraft          bool      `json:"draft_is_draft"`
+			OwnedResourceState    string    `json:"owned_resource_cleanup_state"`
+		}{
+			SchemaVersion: 2, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
+			DisposableBaseSHA: mainSHA, SuiteID: suite, CandidateDigest: v.bundle.CandidateDigest,
+			CandidateRunID: r.ID, CandidateRunAttempt: r.RunAttempt,
+			CandidateRunURL:       fmt.Sprintf("https://github.com/%s/actions/runs/%d", consumerRepo, r.ID),
+			CandidateRunStartedAt: r.StartedAt, CandidateRunUpdatedAt: r.UpdatedAt,
+			CandidateDurationMS: durationMS, ReportArtifactID: artifactID,
+			ReportArtifactURL: fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, r.ID, artifactID),
+			DraftPR:           pr.Number, DraftPRURL: pr.HTMLURL, DraftHeadSHA: pr.Head.SHA,
+			DraftHeadRef: pr.Head.Ref, DraftBaseRef: pr.Base.Ref, DraftState: pr.State,
+			DraftIsDraft: pr.Draft, OwnedResourceState: "retained_for_replay",
+		}
 		encoded, err := json.Marshal(result)
 		if err != nil {
 			return errors.New("cannot encode trusted observer result")
