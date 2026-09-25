@@ -23,18 +23,50 @@ var sha64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var suitePattern = regexp.MustCompile(`^p[1-9][0-9]*-[0-9a-f]{24}$`)
 
 type observed struct {
-	SchemaVersion       int    `json:"schema_version"`
-	SofaPR              int    `json:"sofa_pr"`
-	CandidateSHA        string `json:"candidate_sha"`
-	PRBaseSHA           string `json:"pr_base_sha"`
-	DisposableBaseSHA   string `json:"disposable_base_sha"`
-	SuiteID             string `json:"suite_id"`
-	CandidateDigest     string `json:"candidate_digest"`
-	CandidateRunID      int64  `json:"candidate_run_id"`
-	CandidateRunAttempt int    `json:"candidate_run_attempt"`
-	DraftPR             int    `json:"draft_pr"`
-	DraftPRURL          string `json:"draft_pr_url"`
-	DraftHeadSHA        string `json:"draft_head_sha"`
+	SchemaVersion         int       `json:"schema_version"`
+	SofaPR                int       `json:"sofa_pr"`
+	CandidateSHA          string    `json:"candidate_sha"`
+	PRBaseSHA             string    `json:"pr_base_sha"`
+	DisposableBaseSHA     string    `json:"disposable_base_sha"`
+	SuiteID               string    `json:"suite_id"`
+	CandidateDigest       string    `json:"candidate_digest"`
+	CandidateRunID        int64     `json:"candidate_run_id"`
+	CandidateRunAttempt   int       `json:"candidate_run_attempt"`
+	CandidateRunURL       string    `json:"candidate_run_url"`
+	CandidateRunStartedAt time.Time `json:"candidate_run_started_at"`
+	CandidateRunUpdatedAt time.Time `json:"candidate_run_updated_at"`
+	CandidateDurationMS   int64     `json:"candidate_duration_ms"`
+	ReportArtifactID      int64     `json:"report_artifact_id"`
+	ReportArtifactURL     string    `json:"report_artifact_url"`
+	DraftPR               int       `json:"draft_pr"`
+	DraftPRURL            string    `json:"draft_pr_url"`
+	DraftHeadSHA          string    `json:"draft_head_sha"`
+	DraftHeadRef          string    `json:"draft_head_ref"`
+	DraftBaseRef          string    `json:"draft_base_ref"`
+	DraftState            string    `json:"draft_state"`
+	DraftIsDraft          bool      `json:"draft_is_draft"`
+	OwnedResourceState    string    `json:"owned_resource_cleanup_state"`
+}
+
+func validObserved(r observed) bool {
+	if r.SchemaVersion != 2 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.CandidateRunID < 1 || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.DraftPR < 1 {
+		return false
+	}
+	if r.CandidateRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID) ||
+		r.ReportArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.CandidateRunID, r.ReportArtifactID) ||
+		r.DraftPRURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/pull/%d", r.DraftPR) ||
+		r.DraftHeadRef != "sofa-e2e-result/"+r.SuiteID || r.DraftBaseRef != "main" || r.DraftState != "open" || !r.DraftIsDraft || r.OwnedResourceState != "retained_for_replay" {
+		return false
+	}
+	if r.CandidateRunStartedAt.IsZero() || r.CandidateRunUpdatedAt.IsZero() || !r.CandidateRunUpdatedAt.After(r.CandidateRunStartedAt) {
+		return false
+	}
+	duration := r.CandidateRunUpdatedAt.Sub(r.CandidateRunStartedAt)
+	if duration > 6*time.Hour || duration.Milliseconds() != r.CandidateDurationMS || r.CandidateDurationMS < 1 {
+		return false
+	}
+	digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
+	return r.SuiteID == fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12])
 }
 
 func parseResults(data []byte) ([]observed, error) {
@@ -53,12 +85,8 @@ func parseResults(data []byte) ([]observed, error) {
 		var r observed
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&r); err != nil || r.SchemaVersion != 1 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.CandidateRunID < 1 || r.CandidateRunAttempt != 1 || r.DraftPR < 1 || r.DraftPRURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/pull/%d", r.DraftPR) {
+		if err := decoder.Decode(&r); err != nil || !validObserved(r) {
 			return nil, errors.New("trusted observer result invalid")
-		}
-		digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
-		if r.SuiteID != fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]) {
-			return nil, errors.New("trusted observer suite does not match exact revision")
 		}
 		if decoder.Decode(new(any)) != io.EOF {
 			return nil, errors.New("trusted observer result has trailing data")
@@ -74,8 +102,7 @@ func run(ctx context.Context, data []byte, writer gatestatus.Writer) error {
 		return err
 	}
 	for _, r := range results {
-		runURL := fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID)
-		status := gatestatus.Result{PRNumber: r.SofaPR, HeadSHA: r.CandidateSHA, BaseSHA: r.PRBaseSHA, State: gatestatus.Success, RunURL: runURL, Description: fmt.Sprintf("Hosted E2E %s success", r.SuiteID)}
+		status := gatestatus.Result{PRNumber: r.SofaPR, HeadSHA: r.CandidateSHA, BaseSHA: r.PRBaseSHA, State: gatestatus.Success, RunURL: r.CandidateRunURL, Description: fmt.Sprintf("Hosted E2E %s success", r.SuiteID)}
 		if err := writer.Publish(ctx, status); err != nil {
 			return fmt.Errorf("publish sofa PR %d gate status: %w", r.SofaPR, err)
 		}
