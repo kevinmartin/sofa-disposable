@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -108,6 +111,66 @@ func TestHostedDispatchRetriesStayWithinOriginalBudget(t *testing.T) {
 				t.Fatalf("dispatch=%v err=%v, want dispatch=%v error=%v", dispatch, err, tc.dispatch, tc.err)
 			}
 		})
+	}
+}
+
+func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
+	for _, key := range []string{"SOFA_GATE_PR", "SOFA_GATE_HEAD", "SOFA_GATE_BASE", "SOFA_GATE_APP_ID", "SOFA_GATE_APP_PRIVATE_KEY"} {
+		t.Setenv(key, "")
+	}
+	mainSHA := strings.Repeat("a", 40)
+	p1, p2 := testPull(strings.Repeat("b", 40), strings.Repeat("c", 40)), testPull(strings.Repeat("d", 40), strings.Repeat("c", 40))
+	p1.Number = 1
+	prs := []pull{p1, p2}
+	respond := func(status int, value any) (*http.Response, error) {
+		body, _ := json.Marshal(value)
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
+	}
+	dispatched := ""
+	a := api{token: "read-dispatch-token", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		path := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && path == "/repos/"+sofaRepo+"/pulls":
+			return respond(200, prs)
+		case r.Method == http.MethodGet && path == "/repos/"+sofaRepo+"/pulls/1":
+			return respond(200, p1)
+		case r.Method == http.MethodGet && path == "/repos/"+sofaRepo+"/pulls/2":
+			return respond(200, p2)
+		case r.Method == http.MethodGet && strings.Contains(path, "/contents/"+candidatePath):
+			return respond(200, map[string]string{"encoding": "base64", "content": ""})
+		case r.Method == http.MethodGet && path == "/repos/"+disposableRepo+"/git/ref/heads/main":
+			return respond(200, map[string]any{"object": map[string]string{"sha": mainSHA}})
+		case r.Method == http.MethodGet && strings.Contains(path, "/git/ref/heads/sofa-e2e/"):
+			return respond(200, map[string]any{"object": map[string]string{"sha": strings.Repeat("f", 40)}})
+		case r.Method == http.MethodGet && strings.Contains(path, "/contents/"+workflowPath):
+			p := p1
+			if strings.Contains(r.URL.Query().Get("ref"), suiteID(p2, mainSHA)) {
+				p = p2
+			}
+			return respond(200, map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(branchWorkflow(p, mainSHA)))})
+		case r.Method == http.MethodGet && strings.Contains(path, "/actions/workflows/sofa-gate.yml/runs"):
+			branch := r.URL.Query().Get("branch")
+			if strings.Contains(branch, suiteID(p1, mainSHA)) {
+				return respond(200, runList{TotalCount: 1, Runs: []workflowRun{{ID: 42, HeadBranch: branch, Status: "completed", Conclusion: "failure", CreatedAt: time.Now().Add(-time.Hour)}}})
+			}
+			return respond(200, runList{})
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/actions/workflows/sofa-gate.yml/dispatches"):
+			var request struct {
+				Ref string `json:"ref"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			dispatched = request.Ref
+			return respond(204, nil)
+		default:
+			t.Fatal(fmt.Sprintf("unexpected GitHub API request %s %s", r.Method, path))
+			return nil, nil
+		}
+	})}}
+	err := run(context.Background(), a)
+	if err == nil || !strings.Contains(err.Error(), "1 hosted suite(s) exhausted") || dispatched != "sofa-e2e/"+suiteID(p2, mainSHA) {
+		t.Fatalf("first exhausted suite starved later PR: dispatched=%q err=%v", dispatched, err)
 	}
 }
 
