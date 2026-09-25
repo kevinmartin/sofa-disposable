@@ -63,6 +63,67 @@ type Writer struct {
 	Now           func() time.Time
 }
 
+// Snapshot describes the latest status in sofa's gate context. Source is true
+// only when GitHub attributes that status to this authenticated App's bot.
+type Snapshot struct {
+	Found       bool
+	Source      bool
+	State       State
+	Description string
+}
+
+// Latest reads only a bounded first page. An ambiguous or unavailable page
+// cannot justify preserving a previous green status.
+func (w Writer) Latest(ctx context.Context, headSHA string) (Snapshot, error) {
+	var snapshot Snapshot
+	if !sha40.MatchString(headSHA) {
+		return snapshot, errors.New("invalid sofa head SHA")
+	}
+	jwt, err := w.appJWT()
+	if err != nil {
+		return snapshot, err
+	}
+	var app struct {
+		ID   int64  `json:"id"`
+		Slug string `json:"slug"`
+	}
+	if err := w.request(ctx, http.MethodGet, "/app", jwt, nil, &app, http.StatusOK); err != nil {
+		return snapshot, fmt.Errorf("read sofa App identity: %w", err)
+	}
+	configuredID, _ := strconv.ParseInt(w.AppID, 10, 64)
+	if app.ID != configuredID || app.Slug == "" || strings.ContainsAny(app.Slug, "/\r\n") {
+		return snapshot, errors.New("sofa App identity mismatch")
+	}
+	var statuses []struct {
+		Context     string `json:"context"`
+		State       State  `json:"state"`
+		Description string `json:"description"`
+		Creator     struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"creator"`
+	}
+	path := fmt.Sprintf("/repos/%s/commits/%s/statuses?per_page=100", sofaRepository, headSHA)
+	if err := w.request(ctx, http.MethodGet, path, w.ReadToken, nil, &statuses, http.StatusOK); err != nil {
+		return snapshot, fmt.Errorf("read sofa gate status: %w", err)
+	}
+	for _, status := range statuses {
+		if status.Context != statusContext {
+			continue
+		}
+		return Snapshot{
+			Found:       true,
+			Source:      status.Creator.Type == "Bot" && status.Creator.Login == app.Slug+"[bot]",
+			State:       status.State,
+			Description: status.Description,
+		}, nil
+	}
+	if len(statuses) == 100 {
+		return snapshot, errors.New("sofa gate status outside bounded page")
+	}
+	return snapshot, nil
+}
+
 // Publish fails closed when credentials, source identity, or the current PR
 // revision do not match. It never includes credentials or response bodies in
 // errors, and never sends a status to a candidate-selected repository.

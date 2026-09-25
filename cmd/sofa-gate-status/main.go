@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,10 @@ func parseResults(data []byte) ([]observed, error) {
 		if err := decoder.Decode(&r); err != nil || r.SchemaVersion != 1 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.CandidateRunID < 1 || r.CandidateRunAttempt != 1 || r.DraftPR < 1 || r.DraftPRURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/pull/%d", r.DraftPR) {
 			return nil, errors.New("trusted observer result invalid")
 		}
+		digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
+		if r.SuiteID != fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]) {
+			return nil, errors.New("trusted observer suite does not match exact revision")
+		}
 		if decoder.Decode(new(any)) != io.EOF {
 			return nil, errors.New("trusted observer result has trailing data")
 		}
@@ -70,7 +75,7 @@ func run(ctx context.Context, data []byte, writer gatestatus.Writer) error {
 	}
 	for _, r := range results {
 		runURL := fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID)
-		status := gatestatus.Result{PRNumber: r.SofaPR, HeadSHA: r.CandidateSHA, BaseSHA: r.PRBaseSHA, State: gatestatus.Success, RunURL: runURL, Description: fmt.Sprintf("Hosted fake ACP E2E passed; disposable draft PR #%d", r.DraftPR)}
+		status := gatestatus.Result{PRNumber: r.SofaPR, HeadSHA: r.CandidateSHA, BaseSHA: r.PRBaseSHA, State: gatestatus.Success, RunURL: runURL, Description: fmt.Sprintf("Hosted E2E %s success", r.SuiteID)}
 		if err := writer.Publish(ctx, status); err != nil {
 			return fmt.Errorf("publish sofa PR %d gate status: %w", r.SofaPR, err)
 		}
