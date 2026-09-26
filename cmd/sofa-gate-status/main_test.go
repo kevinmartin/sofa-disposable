@@ -22,7 +22,9 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 	}
 	started := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	r := observed{
-		SchemaVersion: 3, SofaPR: 2, CandidateSHA: strings.Repeat("a", 40), PRBaseSHA: strings.Repeat("b", 40), DisposableBaseSHA: strings.Repeat("c", 40), CandidateDigest: strings.Repeat("e", 64),
+		SchemaVersion: 4, SofaPR: 2, CandidateSHA: strings.Repeat("a", 40), PRBaseSHA: strings.Repeat("b", 40), DisposableBaseSHA: strings.Repeat("c", 40), CandidateDigest: strings.Repeat("e", 64),
+		ProducerRunID: 41, ProducerRunURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/41", ProducerDurationMS: 90000,
+		RetainedArtifactID: 75, ConflictArtifactID: 76, ConflictArtifactURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/41/artifacts/76", ConflictBranchHead: strings.Repeat("b", 40),
 		CandidateRunID: 42, CandidateRunAttempt: 1, CandidateRunURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/42",
 		CandidateRunStartedAt: started, CandidateRunUpdatedAt: started.Add(90 * time.Second), CandidateDurationMS: 90000,
 		ReportArtifactID: 77, ReportArtifactURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/42/artifacts/77",
@@ -41,7 +43,7 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 			Decision    string `json:"decision"`
 			ArtifactID  int64  `json:"artifact_id"`
 			ArtifactURL string `json:"artifact_url"`
-		}{kind, fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]), decision, int64(78 + i), fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/42/artifacts/%d", 78+i)})
+		}{kind, fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]), decision, int64(78 + i), fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/41/artifacts/%d", 78+i)})
 	}
 	data, err := json.Marshal(r)
 	if err != nil {
@@ -78,6 +80,10 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 			r.CandidateDurationMS = int64((6*time.Hour + time.Millisecond) / time.Millisecond)
 		}},
 		{"wrong artifact ID", func(r *observed) { r.ReportArtifactID = 78 }},
+		{"missing conflict evidence", func(r *observed) { r.ConflictArtifactID = 0 }},
+		{"wrong conflict URL", func(r *observed) { r.ConflictArtifactURL += "/forged" }},
+		{"wrong producer", func(r *observed) { r.ProducerRunID = r.CandidateRunID }},
+		{"wrong branch head", func(r *observed) { r.ConflictBranchHead = strings.Repeat("f", 40) }},
 		{"wrong run URL", func(r *observed) { r.CandidateRunURL += "/other" }},
 		{"wrong draft branch", func(r *observed) { r.DraftHeadRef = "other" }},
 		{"missing denial", func(r *observed) { r.Denials = r.Denials[:1] }},

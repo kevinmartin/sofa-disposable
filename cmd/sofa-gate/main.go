@@ -149,6 +149,16 @@ type runList struct {
 	Runs       []workflowRun `json:"workflow_runs"`
 }
 
+type suiteJobs struct {
+	TotalCount int `json:"total_count"`
+	Jobs       []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		RunAttempt int    `json:"run_attempt"`
+	} `json:"jobs"`
+}
+
 type workflowRun struct {
 	ID         int64     `json:"id"`
 	HeadBranch string    `json:"head_branch"`
@@ -236,9 +246,12 @@ on:
       base_sha: {type: string, required: false}
       source_run_id: {type: string, required: false}
       source_run_attempt: {type: string, required: false}
+      mode: {type: string, required: false}
+      producer_run_id: {type: string, required: false}
 permissions: {}
 jobs:
   candidate:
+    if: inputs.mode == 'initial'
     permissions:
       contents: read
       actions: read
@@ -250,7 +263,9 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
+      publish_fault: before-publication
   deny-non-ready:
+    if: inputs.mode == 'initial'
     permissions:
       contents: read
       actions: read
@@ -264,6 +279,7 @@ jobs:
       disposable_base_sha: %s
       reconcile_candidate: false
   deny-completed-redelivery:
+    if: inputs.mode == 'initial'
     permissions:
       contents: read
       actions: read
@@ -276,9 +292,25 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
+  recover:
+    if: inputs.mode == 'recovery' && inputs.producer_run_id != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
+    with:
+      suite_id: %s
+      scenario: edit
+      candidate_sha: %s
+      base_sha: %s
+      disposable_base_sha: %s
+      reconcile_candidate: true
+      producer_run_id: ${{ inputs.producer_run_id }}
+      producer_run_attempt: '1'
 `, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase,
 		p.Head.SHA, denialSuiteID(p, consumerBase, "non-ready"), p.Head.SHA, p.Base.SHA, consumerBase,
-		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase)
+		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase,
+		p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
 }
 
 func (a api) checkCandidate(ctx context.Context, p pull) (bool, error) {
@@ -423,6 +455,10 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 		fmt.Printf("suite %s already has an active or passing hosted run\n", strings.TrimPrefix(branch, "sofa-e2e/"))
 		return nil
 	}
+	mode, producer, err := a.nextScenario(ctx, runs)
+	if err != nil {
+		return err
+	}
 	// Re-read after branch creation; changed base/head cannot dispatch the old suite.
 	current, err := a.currentPR(ctx, p.Number)
 	if err != nil || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
@@ -443,12 +479,99 @@ func (a api) dispatchOnce(ctx context.Context, p pull, branch string) error {
 	}
 	err = a.request(ctx, http.MethodPost, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", dispatchToken, map[string]any{
 		"ref":    branch,
-		"inputs": map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA},
+		"inputs": map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA, "mode": mode, "producer_run_id": producer},
 	}, nil)
 	if err == nil {
 		fmt.Printf("dispatched suite %s on %s\n", strings.TrimPrefix(branch, "sofa-e2e/"), branch)
 	}
 	return err
+}
+
+func (a api) suiteJobs(ctx context.Context, id int64) (suiteJobs, error) {
+	var jobs suiteJobs
+	if id < 1 {
+		return jobs, errors.New("invalid hosted run ID")
+	}
+	err := a.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", disposableRepo, id), &jobs)
+	if err != nil || jobs.TotalCount < 0 || jobs.TotalCount > 100 || jobs.TotalCount != len(jobs.Jobs) {
+		return jobs, errors.New("hosted scenario jobs unavailable")
+	}
+	return jobs, nil
+}
+
+func initialFaultJobs(j suiteJobs) bool {
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped"}
+	for _, prefix := range []string{"deny-non-ready", "deny-completed-redelivery"} {
+		for _, stage := range []string{"execute", "verify", "publish"} {
+			want[prefix+" / "+stage] = "skipped"
+		}
+		want[prefix+" / assert-denied"] = "success"
+	}
+	if j.TotalCount != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(want))
+	for _, job := range j.Jobs {
+		if want[job.Name] == "" || seen[job.Name] || job.Status != "completed" || job.Conclusion != want[job.Name] || job.RunAttempt != 1 {
+			return false
+		}
+		seen[job.Name] = true
+	}
+	return true
+}
+
+func recoveryJobs(j suiteJobs) bool {
+	if j.TotalCount != 4 {
+		return false
+	}
+	want := map[string]bool{"recover / execute": true, "recover / verify": true, "recover / publish": true, "recover / assert-denied": true}
+	for _, job := range j.Jobs {
+		if !want[job.Name] || job.RunAttempt != 1 {
+			return false
+		}
+		delete(want, job.Name)
+	}
+	return len(want) == 0
+}
+
+// A controlled first-run publication failure is followed by one recovery
+// dispatch bound to its producing run. Ordinary unexpected failures retain
+// the existing finite retry behavior.
+func (a api) nextScenario(ctx context.Context, runs runList) (string, string, error) {
+	if runs.TotalCount == 0 {
+		return "initial", "", nil
+	}
+	latest := newestRun(runs)
+	if latest.Status != "completed" || latest.Conclusion != "failure" {
+		return "initial", "", nil
+	}
+	jobs, err := a.suiteJobs(ctx, latest.ID)
+	if err != nil {
+		return "", "", err
+	}
+	if initialFaultJobs(jobs) {
+		return "recovery", strconv.FormatInt(latest.ID, 10), nil
+	}
+	if !recoveryJobs(jobs) {
+		return "initial", "", nil
+	}
+	var producer workflowRun
+	for _, r := range runs.Runs {
+		if !r.CreatedAt.Before(latest.CreatedAt) {
+			continue
+		}
+		j, err := a.suiteJobs(ctx, r.ID)
+		if err != nil {
+			return "", "", err
+		}
+		if initialFaultJobs(j) && (producer.ID == 0 || r.CreatedAt.After(producer.CreatedAt)) {
+			producer = r
+		}
+	}
+	if producer.ID == 0 {
+		return "", "", errors.New("recovery has no exact controlled producer")
+	}
+	return "recovery", strconv.FormatInt(producer.ID, 10), nil
 }
 
 // A failed or cancelled Actions run can be retried only within the original
