@@ -65,7 +65,7 @@ func (a api) fixtureWriter() fixtureGate {
 	if a.fixture != nil {
 		return a.fixture
 	}
-	return fixturelifecycle.Client{HTTP: a.http, Token: a.projectToken}
+	return fixturelifecycle.Client{HTTP: a.http, Token: a.projectToken, IssueToken: a.token}
 }
 
 func coordinatorRunURL() string {

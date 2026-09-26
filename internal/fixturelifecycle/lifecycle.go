@@ -47,9 +47,10 @@ type Resource struct {
 }
 
 type Client struct {
-	HTTP    *http.Client
-	Token   string
-	BaseURL string // Empty uses GitHub. Tests may supply a local fake transport.
+	HTTP       *http.Client
+	Token      string // Project GraphQL credential.
+	IssueToken string // Disposable-only issue REST credential.
+	BaseURL    string // Empty uses GitHub. Tests may supply a local fake transport.
 }
 
 type issue struct {
@@ -63,7 +64,14 @@ type issue struct {
 }
 
 func (c Client) call(ctx context.Context, method, path string, input, output any) error {
-	if c.Token == "" || c.HTTP == nil || (!strings.HasPrefix(path, "/repos/"+repo+"/") && path != "/graphql") || strings.ContainsAny(path, "\r\n#") {
+	if c.HTTP == nil || (!strings.HasPrefix(path, "/repos/"+repo+"/") && path != "/graphql") || strings.ContainsAny(path, "\r\n#") {
+		return errors.New("fixture lifecycle credential or request unavailable")
+	}
+	token := c.IssueToken
+	if path == "/graphql" {
+		token = c.Token
+	}
+	if token == "" {
 		return errors.New("fixture lifecycle credential or request unavailable")
 	}
 	var body io.Reader
@@ -82,7 +90,7 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "sofa-disposable-fixture-lifecycle")

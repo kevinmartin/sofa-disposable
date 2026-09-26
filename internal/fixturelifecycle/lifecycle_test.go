@@ -25,8 +25,12 @@ func TestReadyAndCleanupAreExactAndIdempotent(t *testing.T) {
 	created, added, ready, closed, archived := 0, 0, 0, 0, 0
 	hasIssue, hasItem := false, false
 	status := todoOptionID
-	c := Client{Token: "fixture-token", BaseURL: "https://api.github.test", HTTP: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Header.Get("Authorization") != "Bearer fixture-token" {
+	c := Client{Token: "project-token", IssueToken: "issue-token", BaseURL: "https://api.github.test", HTTP: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		wantToken := "Bearer issue-token"
+		if r.URL.Path == "/graphql" {
+			wantToken = "Bearer project-token"
+		}
+		if r.Header.Get("Authorization") != wantToken {
 			t.Fatal("wrong fixture credential")
 		}
 		switch {
@@ -108,7 +112,7 @@ func TestUntrustedOrAmbiguousIssueCannotBeReused(t *testing.T) {
 		{"ambiguous", []issue{{Number: 41, NodeID: "I_41", State: "open", Title: s.title(), Body: s.body(), HTMLURL: "https://github.com/" + repo + "/issues/41"}, {Number: 42, NodeID: "I_42", State: "open", Title: s.title(), Body: s.body(), HTMLURL: "https://github.com/" + repo + "/issues/42"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Client{Token: "test", BaseURL: "https://api.github.test", HTTP: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+			c := Client{Token: "project-token", IssueToken: "issue-token", BaseURL: "https://api.github.test", HTTP: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
 				if r.Method != http.MethodGet {
 					t.Fatal("unexpected mutation")
 				}
