@@ -1,138 +1,49 @@
-# Trusted coordinator lives on the disposable default branch. It checks only
-# PR metadata and creates unprivileged, suite-owned test workflow branches.
-name: sofa hosted E2E coordinator
-
+name: sofa hosted E2E candidate
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       sofa_pr: {type: string, required: false}
       candidate_sha: {type: string, required: false}
       base_sha: {type: string, required: false}
       source_run_id: {type: string, required: false}
       source_run_attempt: {type: string, required: false}
-  workflow_dispatch:
-    inputs:
-      sofa_pr:
-        description: Sofa PR number; empty means discover all open PRs
-        type: string
-        required: false
-      candidate_sha:
-        description: Expected sofa PR head SHA
-        type: string
-        required: false
-      base_sha:
-        description: Expected sofa PR base SHA
-        type: string
-        required: false
-      source_run_id:
-        description: Metadata-only sofa event bridge run ID
-        type: string
-        required: false
-      source_run_attempt:
-        description: Metadata-only sofa event bridge attempt
-        type: string
-        required: false
-  schedule:
-    - cron: '17,47 * * * *'
-
 permissions: {}
-
-concurrency:
-  group: sofa-gate-coordinator
-  cancel-in-progress: false
-
 jobs:
-  coordinate:
-    if: >-
-      github.repository == 'kevinmartin/sofa-disposable' &&
-      github.ref == 'refs/heads/main' &&
-      github.event.repository.fork == false &&
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
-        (github.event_name == 'workflow_run' &&
-          github.event.workflow_run.name == 'sofa hosted E2E candidate' &&
-          github.event.workflow_run.head_repository.full_name == 'kevinmartin/sofa-disposable' &&
-          github.event.workflow_run.event == 'workflow_dispatch' &&
-          github.event.workflow_run.path == '.github/workflows/sofa-gate.yml' &&
-          startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')))
-    environment: sofa-gate-coordinator
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  candidate:
     permissions:
       contents: read
-      actions: write
-      issues: write
-    steps:
-      - name: Check out trusted disposable coordinator
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Discover exact sofa PR revisions and dispatch owned test branches
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOFA_DISPOSABLE_WORKFLOW_TOKEN: ${{ secrets.SOFA_DISPOSABLE_WORKFLOW_TOKEN }}
-          SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
-          SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
-          SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
-          SOFA_GATE_PR: ${{ inputs.sofa_pr }}
-          SOFA_GATE_HEAD: ${{ inputs.candidate_sha }}
-          SOFA_GATE_BASE: ${{ inputs.base_sha }}
-          SOFA_GATE_SOURCE_RUN: ${{ inputs.source_run_id }}
-          SOFA_GATE_SOURCE_ATTEMPT: ${{ inputs.source_run_attempt }}
-        run: go run ./cmd/sofa-gate
-
-  observe:
-    if: >-
-      github.repository == 'kevinmartin/sofa-disposable' &&
-      github.ref == 'refs/heads/main' &&
-      github.event.repository.fork == false &&
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
-        (github.event_name == 'workflow_run' &&
-          github.event.workflow_run.name == 'sofa hosted E2E candidate' &&
-          github.event.workflow_run.head_repository.full_name == 'kevinmartin/sofa-disposable' &&
-          github.event.workflow_run.event == 'workflow_dispatch' &&
-          github.event.workflow_run.path == '.github/workflows/sofa-gate.yml' &&
-          startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')))
-    environment: sofa-gate-coordinator
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: read
       actions: read
-    steps:
-      - name: Check out trusted disposable observer
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Validate exact hosted run and publish bounded fixture draft PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}
-          SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
-          SOFA_GATE_PR: ${{ inputs.sofa_pr }}
-          SOFA_GATE_RESULT_PATH: gate-results.jsonl
-        run: go run ./cmd/sofa-gate-observe
-      - name: Carry trusted validated gate results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: sofa-e2e-observed-${{ github.run_id }}-${{ github.run_attempt }}
-          path: gate-results.jsonl
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Publish App-sourced sofa status for validated results
-        if: hashFiles('gate-results.jsonl') != ''
-        env:
-          SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
-          SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
-          SOFA_GATE_RESULT_PATH: gate-results.jsonl
-        run: go run ./cmd/sofa-gate-status
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@2e3ce394576b2e368e0bbbb419ef3ab3321b7432
+    with:
+      suite_id: p2-360c243085f79bdcf6835b99
+      scenario: edit
+      candidate_sha: 2e3ce394576b2e368e0bbbb419ef3ab3321b7432
+      base_sha: bc5623fa9128e58efb391e1cdd6ce69f339bb9e5
+      disposable_base_sha: 6c04f9d91cc86eac75c462cdf08b1d99e689fdcd
+      reconcile_candidate: false
+  deny-non-ready:
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@2e3ce394576b2e368e0bbbb419ef3ab3321b7432
+    with:
+      suite_id: p2-ebcba21bdf06a37651e942f4
+      scenario: denied
+      denial_kind: non-ready
+      candidate_sha: 2e3ce394576b2e368e0bbbb419ef3ab3321b7432
+      base_sha: bc5623fa9128e58efb391e1cdd6ce69f339bb9e5
+      disposable_base_sha: 6c04f9d91cc86eac75c462cdf08b1d99e689fdcd
+      reconcile_candidate: false
+  deny-completed-redelivery:
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@2e3ce394576b2e368e0bbbb419ef3ab3321b7432
+    with:
+      suite_id: p2-f6036bd4891707209870483f
+      scenario: denied
+      denial_kind: completed-redelivery
+      candidate_sha: 2e3ce394576b2e368e0bbbb419ef3ab3321b7432
+      base_sha: bc5623fa9128e58efb391e1cdd6ce69f339bb9e5
+      disposable_base_sha: 6c04f9d91cc86eac75c462cdf08b1d99e689fdcd
+      reconcile_candidate: false
