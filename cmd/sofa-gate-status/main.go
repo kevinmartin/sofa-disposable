@@ -56,18 +56,48 @@ type observed struct {
 		ArtifactID  int64  `json:"artifact_id"`
 		ArtifactURL string `json:"artifact_url"`
 	} `json:"denials"`
-	DraftPR            int    `json:"draft_pr"`
-	DraftPRURL         string `json:"draft_pr_url"`
-	DraftHeadSHA       string `json:"draft_head_sha"`
-	DraftHeadRef       string `json:"draft_head_ref"`
-	DraftBaseRef       string `json:"draft_base_ref"`
-	DraftState         string `json:"draft_state"`
-	DraftIsDraft       bool   `json:"draft_is_draft"`
-	OwnedResourceState string `json:"owned_resource_cleanup_state"`
+	Scenarios          []scenarioEvidence `json:"scenarios"`
+	DraftPR            int                `json:"draft_pr"`
+	DraftPRURL         string             `json:"draft_pr_url"`
+	DraftHeadSHA       string             `json:"draft_head_sha"`
+	DraftHeadRef       string             `json:"draft_head_ref"`
+	DraftBaseRef       string             `json:"draft_base_ref"`
+	DraftState         string             `json:"draft_state"`
+	DraftIsDraft       bool               `json:"draft_is_draft"`
+	OwnedResourceState string             `json:"owned_resource_cleanup_state"`
+}
+
+type scenarioEvidence struct {
+	ID                 string `json:"id"`
+	RunID              int64  `json:"run_id"`
+	Job                string `json:"job"`
+	Command            string `json:"command"`
+	JobDurationMS      int64  `json:"job_duration_ms"`
+	FakePromptRequests int    `json:"fake_prompt_requests"`
+	ProviderRequests   int    `json:"provider_requests"`
+}
+
+func validScenarios(r observed) bool {
+	if len(r.Scenarios) != 5 {
+		return false
+	}
+	want := []scenarioEvidence{
+		{ID: "edit-fault", RunID: r.ProducerRunID, Job: "candidate / execute", Command: "/toolkit/sofa execute", FakePromptRequests: 1},
+		{ID: "branch-conflict", RunID: r.ProducerRunID, Job: "candidate / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublicationConflict$' ./cmd/sofa"},
+		{ID: "non-ready", RunID: r.ProducerRunID, Job: "deny-non-ready / assert-denied", Command: "bin/e2e-fixture deny"},
+		{ID: "completed-redelivery", RunID: r.ProducerRunID, Job: "deny-completed-redelivery / assert-denied", Command: "bin/e2e-fixture deny"},
+		{ID: "recovery-publication", RunID: r.CandidateRunID, Job: "recover / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublication$' ./cmd/sofa"},
+	}
+	for i, got := range r.Scenarios {
+		if got.ID != want[i].ID || got.RunID != want[i].RunID || got.Job != want[i].Job || got.Command != want[i].Command || got.FakePromptRequests != want[i].FakePromptRequests || got.ProviderRequests != 0 || got.JobDurationMS < 1 || got.JobDurationMS > int64((6*time.Hour)/time.Millisecond) {
+			return false
+		}
+	}
+	return true
 }
 
 func validObserved(r observed) bool {
-	if r.SchemaVersion != 4 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.ProducerRunID < 1 || r.CandidateRunID <= r.ProducerRunID || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.RetainedArtifactID < 1 || r.ConflictArtifactID < 1 || r.ConflictArtifactID == r.RetainedArtifactID || r.DraftPR < 1 || r.ConflictBranchHead != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || r.TestIssue < 1 || r.ProjectItem == "" || r.TestItemState != "closed_archived" {
+	if r.SchemaVersion != 5 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.ProducerRunID < 1 || r.CandidateRunID <= r.ProducerRunID || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.RetainedArtifactID < 1 || r.ConflictArtifactID < 1 || r.ConflictArtifactID == r.RetainedArtifactID || r.DraftPR < 1 || r.ConflictBranchHead != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || r.TestIssue < 1 || r.ProjectItem == "" || r.TestItemState != "closed_archived" || !validScenarios(r) {
 		return false
 	}
 	if r.CandidateRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID) ||

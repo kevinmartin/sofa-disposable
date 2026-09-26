@@ -37,7 +37,7 @@ type observed struct {
 }
 
 func exactSuite(r observed) (fixturelifecycle.Suite, error) {
-	if r.SchemaVersion != 4 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) {
+	if r.SchemaVersion != 5 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) {
 		return fixturelifecycle.Suite{}, errors.New("invalid trusted observer suite identity")
 	}
 	digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))

@@ -214,13 +214,73 @@ type runList struct {
 }
 
 type jobList struct {
-	TotalCount int `json:"total_count"`
-	Jobs       []struct {
-		Name       string `json:"name"`
-		Conclusion string `json:"conclusion"`
-		Status     string `json:"status"`
-		RunAttempt int    `json:"run_attempt"`
-	} `json:"jobs"`
+	TotalCount int         `json:"total_count"`
+	Jobs       []hostedJob `json:"jobs"`
+}
+
+type hostedJob struct {
+	Name        string    `json:"name"`
+	Conclusion  string    `json:"conclusion"`
+	Status      string    `json:"status"`
+	RunAttempt  int       `json:"run_attempt"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+type scenarioEvidence struct {
+	ID                 string `json:"id"`
+	RunID              int64  `json:"run_id"`
+	Job                string `json:"job"`
+	Command            string `json:"command"`
+	JobDurationMS      int64  `json:"job_duration_ms"`
+	FakePromptRequests int    `json:"fake_prompt_requests"`
+	ProviderRequests   int    `json:"provider_requests"`
+}
+
+func (c client) scenarioEvidence(ctx context.Context, producer, recovered workflowRun) ([]scenarioEvidence, error) {
+	var fault, recovery jobList
+	for _, run := range []struct {
+		id   int64
+		jobs *jobList
+	}{{producer.ID, &fault}, {recovered.ID, &recovery}} {
+		if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", consumerRepo, run.id), run.jobs); err != nil {
+			return nil, err
+		}
+	}
+	if !validFaultJobs(fault) || !validRecoveryJobs(recovery) {
+		return nil, errors.New("hosted scenario job matrix changed")
+	}
+	requested := []struct {
+		id, job, command string
+		run              workflowRun
+		jobs             jobList
+		prompts          int
+	}{
+		{"edit-fault", "candidate / execute", "/toolkit/sofa execute", producer, fault, 1},
+		{"branch-conflict", "candidate / publish", "go test -count=1 -run '^TestHostedArtifactPublicationConflict$' ./cmd/sofa", producer, fault, 0},
+		{"non-ready", "deny-non-ready / assert-denied", "bin/e2e-fixture deny", producer, fault, 0},
+		{"completed-redelivery", "deny-completed-redelivery / assert-denied", "bin/e2e-fixture deny", producer, fault, 0},
+		{"recovery-publication", "recover / publish", "go test -count=1 -run '^TestHostedArtifactPublication$' ./cmd/sofa", recovered, recovery, 0},
+	}
+	evidence := make([]scenarioEvidence, 0, len(requested))
+	for _, want := range requested {
+		var found *hostedJob
+		for i := range want.jobs.Jobs {
+			if want.jobs.Jobs[i].Name == want.job {
+				found = &want.jobs.Jobs[i]
+				break
+			}
+		}
+		if found == nil || found.StartedAt.IsZero() || !found.CompletedAt.After(found.StartedAt) || found.CompletedAt.Sub(found.StartedAt) > maxHostedRunDuration {
+			return nil, errors.New("hosted scenario job timing unavailable")
+		}
+		ms := found.CompletedAt.Sub(found.StartedAt).Milliseconds()
+		if ms < 1 {
+			return nil, errors.New("hosted scenario job timing below reporting resolution")
+		}
+		evidence = append(evidence, scenarioEvidence{want.id, want.run.ID, want.job, want.command, ms, want.prompts, 0})
+	}
+	return evidence, nil
 }
 
 type artifactList struct {
@@ -1157,6 +1217,10 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil || !ready {
 		return err
 	}
+	scenarios, err := c.scenarioEvidence(ctx, producer, r)
+	if err != nil {
+		return err
+	}
 	files, artifactID, err := c.reportArtifact(ctx, r, suite)
 	if err != nil {
 		return err
@@ -1213,39 +1277,40 @@ func (c client) observe(ctx context.Context, p pull) error {
 		// timestamps, and canonical links. Never copy candidate artifact content,
 		// logs, credentials, or environment values into the status handoff.
 		result := struct {
-			SchemaVersion         int              `json:"schema_version"`
-			SofaPR                int              `json:"sofa_pr"`
-			CandidateSHA          string           `json:"candidate_sha"`
-			PRBaseSHA             string           `json:"pr_base_sha"`
-			DisposableBaseSHA     string           `json:"disposable_base_sha"`
-			SuiteID               string           `json:"suite_id"`
-			CandidateDigest       string           `json:"candidate_digest"`
-			ProducerRunID         int64            `json:"producer_run_id"`
-			ProducerRunURL        string           `json:"producer_run_url"`
-			ProducerDurationMS    int64            `json:"producer_duration_ms"`
-			RetainedArtifactID    int64            `json:"retained_artifact_id"`
-			ConflictArtifactID    int64            `json:"conflict_artifact_id"`
-			ConflictArtifactURL   string           `json:"conflict_artifact_url"`
-			ConflictBranchHead    string           `json:"conflict_branch_head"`
-			CandidateRunID        int64            `json:"candidate_run_id"`
-			CandidateRunAttempt   int              `json:"candidate_run_attempt"`
-			CandidateRunURL       string           `json:"candidate_run_url"`
-			CandidateRunStartedAt time.Time        `json:"candidate_run_started_at"`
-			CandidateRunUpdatedAt time.Time        `json:"candidate_run_updated_at"`
-			CandidateDurationMS   int64            `json:"candidate_duration_ms"`
-			ReportArtifactID      int64            `json:"report_artifact_id"`
-			ReportArtifactURL     string           `json:"report_artifact_url"`
-			Denials               []denialEvidence `json:"denials"`
-			DraftPR               int              `json:"draft_pr"`
-			DraftPRURL            string           `json:"draft_pr_url"`
-			DraftHeadSHA          string           `json:"draft_head_sha"`
-			DraftHeadRef          string           `json:"draft_head_ref"`
-			DraftBaseRef          string           `json:"draft_base_ref"`
-			DraftState            string           `json:"draft_state"`
-			DraftIsDraft          bool             `json:"draft_is_draft"`
-			OwnedResourceState    string           `json:"owned_resource_cleanup_state"`
+			SchemaVersion         int                `json:"schema_version"`
+			SofaPR                int                `json:"sofa_pr"`
+			CandidateSHA          string             `json:"candidate_sha"`
+			PRBaseSHA             string             `json:"pr_base_sha"`
+			DisposableBaseSHA     string             `json:"disposable_base_sha"`
+			SuiteID               string             `json:"suite_id"`
+			CandidateDigest       string             `json:"candidate_digest"`
+			ProducerRunID         int64              `json:"producer_run_id"`
+			ProducerRunURL        string             `json:"producer_run_url"`
+			ProducerDurationMS    int64              `json:"producer_duration_ms"`
+			RetainedArtifactID    int64              `json:"retained_artifact_id"`
+			ConflictArtifactID    int64              `json:"conflict_artifact_id"`
+			ConflictArtifactURL   string             `json:"conflict_artifact_url"`
+			ConflictBranchHead    string             `json:"conflict_branch_head"`
+			CandidateRunID        int64              `json:"candidate_run_id"`
+			CandidateRunAttempt   int                `json:"candidate_run_attempt"`
+			CandidateRunURL       string             `json:"candidate_run_url"`
+			CandidateRunStartedAt time.Time          `json:"candidate_run_started_at"`
+			CandidateRunUpdatedAt time.Time          `json:"candidate_run_updated_at"`
+			CandidateDurationMS   int64              `json:"candidate_duration_ms"`
+			ReportArtifactID      int64              `json:"report_artifact_id"`
+			ReportArtifactURL     string             `json:"report_artifact_url"`
+			Denials               []denialEvidence   `json:"denials"`
+			Scenarios             []scenarioEvidence `json:"scenarios"`
+			DraftPR               int                `json:"draft_pr"`
+			DraftPRURL            string             `json:"draft_pr_url"`
+			DraftHeadSHA          string             `json:"draft_head_sha"`
+			DraftHeadRef          string             `json:"draft_head_ref"`
+			DraftBaseRef          string             `json:"draft_base_ref"`
+			DraftState            string             `json:"draft_state"`
+			DraftIsDraft          bool               `json:"draft_is_draft"`
+			OwnedResourceState    string             `json:"owned_resource_cleanup_state"`
 		}{
-			SchemaVersion: 4, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
+			SchemaVersion: 5, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
 			DisposableBaseSHA: mainSHA, SuiteID: suite, CandidateDigest: v.bundle.CandidateDigest,
 			ProducerRunID:      producer.ID,
 			ProducerRunURL:     fmt.Sprintf("https://github.com/%s/actions/runs/%d", consumerRepo, producer.ID),
@@ -1255,7 +1320,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 			CandidateRunID:      r.ID, CandidateRunAttempt: r.RunAttempt,
 			CandidateRunURL:       fmt.Sprintf("https://github.com/%s/actions/runs/%d", consumerRepo, r.ID),
 			CandidateRunStartedAt: r.StartedAt, CandidateRunUpdatedAt: r.UpdatedAt,
-			CandidateDurationMS: durationMS, ReportArtifactID: artifactID, Denials: denials,
+			CandidateDurationMS: durationMS, ReportArtifactID: artifactID, Denials: denials, Scenarios: scenarios,
 			ReportArtifactURL: fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, r.ID, artifactID),
 			DraftPR:           pr.Number, DraftPRURL: pr.HTMLURL, DraftHeadSHA: pr.Head.SHA,
 			DraftHeadRef: pr.Head.Ref, DraftBaseRef: pr.Base.Ref, DraftState: pr.State,
