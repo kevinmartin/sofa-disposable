@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kevinmartin/sofa-disposable/internal/fixturelifecycle"
 	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
 
@@ -32,12 +33,19 @@ const (
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var errRetryBudget = errors.New("hosted suite retry budget exhausted")
 var errNotReady = errors.New("sofa candidate test workflow unavailable")
+var errSuiteCompleted = errors.New("hosted suite already completed")
+
+type fixtureGate interface {
+	EnsureReady(context.Context, fixturelifecycle.Suite) (fixturelifecycle.Resource, error)
+}
 
 type api struct {
 	http          *http.Client
 	token         string
 	workflowToken string
 	status        gateStatus
+	fixture       fixtureGate
+	projectToken  string
 }
 
 type gateStatus interface {
@@ -51,6 +59,13 @@ func (a api) statusWriter() gateStatus {
 		return a.status
 	}
 	return gatestatus.Writer{Client: a.http, AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")}
+}
+
+func (a api) fixtureWriter() fixtureGate {
+	if a.fixture != nil {
+		return a.fixture
+	}
+	return fixturelifecycle.Client{HTTP: a.http, Token: a.projectToken}
 }
 
 func coordinatorRunURL() string {
@@ -534,6 +549,33 @@ func run(ctx context.Context, a api) error {
 			if err := a.reconcileStatus(ctx, p, suite); err != nil {
 				return err
 			}
+			status, err := a.statusWriter().Latest(ctx, p.Head.SHA)
+			if err != nil {
+				return err
+			}
+			if status.Found && status.Source && status.State == gatestatus.Success && status.Description == suiteDescription(suite, gatestatus.Success) {
+				name := "sofa-e2e/" + suite
+				ref, exists, err := a.branch(ctx, name)
+				if err != nil {
+					return err
+				}
+				if exists {
+					if !shaPattern.MatchString(ref.Object.SHA) {
+						return errors.New("completed suite branch SHA invalid")
+					}
+					var file content
+					path := "/repos/" + disposableRepo + "/contents/" + workflowPath + "?ref=" + url.QueryEscape(name)
+					if err := a.get(ctx, path, &file); err != nil || file.Encoding != "base64" {
+						return errors.New("completed suite workflow unavailable")
+					}
+					actual, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
+					mainRef, ok, readErr := a.branch(ctx, "main")
+					if err != nil || readErr != nil || !ok || suiteID(p, mainRef.Object.SHA) != suite || string(actual) != branchWorkflow(p, mainRef.Object.SHA) {
+						return errors.New("completed suite workflow differs from exact suite")
+					}
+				}
+				return errSuiteCompleted
+			}
 			ready, err := a.checkCandidate(ctx, p)
 			if err != nil {
 				return err
@@ -543,6 +585,10 @@ func run(ctx context.Context, a api) error {
 			}
 			return nil
 		})
+		if errors.Is(err, errSuiteCompleted) {
+			fmt.Printf("PR %d exact hosted suite already completed\n", p.Number)
+			continue
+		}
 		if errors.Is(err, errNotReady) {
 			fmt.Printf("PR %d has no candidate test workflow; awaiting rollout\n", p.Number)
 			continue
@@ -556,6 +602,17 @@ func run(ctx context.Context, a api) error {
 				return fmt.Errorf("suite preparation failed (%v) and failure status unavailable: %w", err, publishErr)
 			}
 			return err
+		}
+		mainRef, ok, err := a.branch(ctx, "main")
+		if err != nil || !ok || "sofa-e2e/"+suiteID(p, mainRef.Object.SHA) != branch {
+			return errors.New("disposable base changed before test item setup")
+		}
+		fixture := fixturelifecycle.Suite{ID: suiteID(p, mainRef.Object.SHA), CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA, DisposableBaseSHA: mainRef.Object.SHA}
+		if _, err := a.fixtureWriter().EnsureReady(ctx, fixture); err != nil {
+			if publishErr := a.publishFailure(ctx, p, suiteDescription(fixture.ID, gatestatus.Failure), coordinatorRunURL()); publishErr != nil {
+				return fmt.Errorf("suite Project setup failed (%v) and failure status unavailable: %w", err, publishErr)
+			}
+			return fmt.Errorf("suite Project setup failed: %w", err)
 		}
 		if err := a.dispatchOnce(ctx, p, branch); err != nil {
 			if manual == "" && errors.Is(err, errRetryBudget) {
@@ -578,7 +635,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "trusted coordinator identity unavailable")
 		os.Exit(1)
 	}
-	a := api{token: token, workflowToken: os.Getenv("SOFA_DISPOSABLE_WORKFLOW_TOKEN"), http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+	a := api{token: token, workflowToken: os.Getenv("SOFA_DISPOSABLE_WORKFLOW_TOKEN"), projectToken: os.Getenv("SOFA_PROJECTS_TOKEN"), http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return errors.New("redirect refused")
 	}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)

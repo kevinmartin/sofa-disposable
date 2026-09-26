@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kevinmartin/sofa-disposable/internal/fixturelifecycle"
 	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
 
@@ -24,6 +25,13 @@ type fakeGateStatus struct {
 	latestErr     error
 	published     []gatestatus.Result
 	dispatchToken string
+}
+
+type fakeFixtureGate struct{ seen []fixturelifecycle.Suite }
+
+func (f *fakeFixtureGate) EnsureReady(_ context.Context, suite fixturelifecycle.Suite) (fixturelifecycle.Resource, error) {
+	f.seen = append(f.seen, suite)
+	return fixturelifecycle.Resource{IssueNumber: 1, IssueURL: "https://github.com/kevinmartin/sofa-disposable/issues/1", ProjectItem: "test-item"}, nil
 }
 
 func (f *fakeGateStatus) DispatchToken(context.Context) (string, error) {
@@ -186,7 +194,7 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 	}
 	dispatched := ""
 	status := &fakeGateStatus{dispatchToken: "app-actions-token"}
-	a := api{token: "read-dispatch-token", workflowToken: "workflow-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	a := api{token: "read-dispatch-token", workflowToken: "workflow-token", status: status, fixture: &fakeFixtureGate{}, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		path := r.URL.Path
 		switch {
 		case r.Method == http.MethodGet && path == "/repos/"+sofaRepo+"/pulls":
