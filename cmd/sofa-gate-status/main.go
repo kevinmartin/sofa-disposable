@@ -30,6 +30,13 @@ type observed struct {
 	DisposableBaseSHA     string    `json:"disposable_base_sha"`
 	SuiteID               string    `json:"suite_id"`
 	CandidateDigest       string    `json:"candidate_digest"`
+	ProducerRunID         int64     `json:"producer_run_id"`
+	ProducerRunURL        string    `json:"producer_run_url"`
+	ProducerDurationMS    int64     `json:"producer_duration_ms"`
+	RetainedArtifactID    int64     `json:"retained_artifact_id"`
+	ConflictArtifactID    int64     `json:"conflict_artifact_id"`
+	ConflictArtifactURL   string    `json:"conflict_artifact_url"`
+	ConflictBranchHead    string    `json:"conflict_branch_head"`
 	CandidateRunID        int64     `json:"candidate_run_id"`
 	CandidateRunAttempt   int       `json:"candidate_run_attempt"`
 	CandidateRunURL       string    `json:"candidate_run_url"`
@@ -56,11 +63,13 @@ type observed struct {
 }
 
 func validObserved(r observed) bool {
-	if r.SchemaVersion != 3 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.CandidateRunID < 1 || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.DraftPR < 1 {
+	if r.SchemaVersion != 4 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.ProducerRunID < 1 || r.CandidateRunID <= r.ProducerRunID || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.RetainedArtifactID < 1 || r.ConflictArtifactID < 1 || r.ConflictArtifactID == r.RetainedArtifactID || r.DraftPR < 1 || r.ConflictBranchHead != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		return false
 	}
 	if r.CandidateRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID) ||
+		r.ProducerRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.ProducerRunID) ||
 		r.ReportArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.CandidateRunID, r.ReportArtifactID) ||
+		r.ConflictArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.ProducerRunID, r.ConflictArtifactID) ||
 		r.DraftPRURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/pull/%d", r.DraftPR) ||
 		r.DraftHeadRef != "sofa-e2e-result/"+r.SuiteID || r.DraftBaseRef != "main" || r.DraftState != "open" || !r.DraftIsDraft || r.OwnedResourceState != "retained_for_replay" {
 		return false
@@ -69,7 +78,7 @@ func validObserved(r observed) bool {
 		return false
 	}
 	duration := r.CandidateRunUpdatedAt.Sub(r.CandidateRunStartedAt)
-	if duration > 6*time.Hour || duration.Milliseconds() != r.CandidateDurationMS || r.CandidateDurationMS < 1 {
+	if duration > 6*time.Hour || duration.Milliseconds() != r.CandidateDurationMS || r.CandidateDurationMS < 1 || r.ProducerDurationMS < 1 || r.ProducerDurationMS > int64((45*time.Minute)/time.Millisecond) {
 		return false
 	}
 	digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
@@ -81,7 +90,7 @@ func validObserved(r observed) bool {
 		digest := sha256.Sum256([]byte(r.SuiteID + ":denied:" + kind))
 		decision := map[string]string{"non-ready": "admission-denied", "completed-redelivery": "already-completed"}[kind]
 		if d.Kind != kind || d.SuiteID != fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12]) || d.Decision != decision || d.ArtifactID < 1 || d.ArtifactID == r.ReportArtifactID ||
-			d.ArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.CandidateRunID, d.ArtifactID) {
+			d.ArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.ProducerRunID, d.ArtifactID) {
 			return false
 		}
 		if i > 0 && d.ArtifactID == r.Denials[0].ArtifactID {

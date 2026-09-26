@@ -397,6 +397,8 @@ func TestFailedRerunBecomesPendingAndExhaustionBecomesFailure(t *testing.T) {
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/actions/workflows/sofa-gate.yml/runs"):
 					body, _ := json.Marshal(runList{TotalCount: 1, Runs: []workflowRun{{ID: 42, HeadBranch: branch, Status: "completed", Conclusion: "failure", CreatedAt: time.Now().Add(-tc.age)}}})
 					return testResponse(200, string(body)), nil
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/actions/runs/42/jobs"):
+					return testResponse(200, `{"total_count":0,"jobs":[]}`), nil
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls/2":
 					body, _ := json.Marshal(p)
 					return testResponse(200, string(body)), nil
@@ -522,8 +524,8 @@ func TestSuiteBranchBindsFullCandidateAndBaseWithoutSecrets(t *testing.T) {
 	if jobs[0].suite == jobs[1].suite || jobs[0].suite == jobs[2].suite || jobs[1].suite == jobs[2].suite {
 		t.Fatal("hosted scenarios share an artifact suite ID")
 	}
-	if strings.Count(workflow, "    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@") != len(jobs) {
-		t.Fatal("caller does not have exactly three candidate reusable calls")
+	if strings.Count(workflow, "    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@") != len(jobs)+1 {
+		t.Fatal("caller does not have exactly four candidate reusable calls")
 	}
 	for i, job := range jobs {
 		start := strings.Index(workflow, "\n  "+job.name+":\n")
@@ -557,6 +559,11 @@ func TestSuiteBranchBindsFullCandidateAndBaseWithoutSecrets(t *testing.T) {
 		}
 		if job.denialKind == "" && strings.Contains(block, "denial_kind:") {
 			t.Errorf("edit job unexpectedly selects denial")
+		}
+	}
+	for _, required := range []string{"mode: {type: string, required: false}", "producer_run_id: {type: string, required: false}", "if: inputs.mode == 'initial'", "publish_fault: before-publication", "recover:\n    if: inputs.mode == 'recovery' && inputs.producer_run_id != ''", "reconcile_candidate: true", "producer_run_id: ${{ inputs.producer_run_id }}", "producer_run_attempt: '1'"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("caller lacks recovery contract %q", required)
 		}
 	}
 	if denialSuiteID(p, consumerBase, "non-ready") == denialSuiteID(testPull(head, strings.Repeat("c", 40)), consumerBase, "non-ready") ||

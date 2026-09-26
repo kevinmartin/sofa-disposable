@@ -303,6 +303,89 @@ func validJobs(j jobList) bool {
 	return true
 }
 
+func validFaultJobs(j jobList) bool {
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped"}
+	for _, name := range []string{"deny-non-ready", "deny-completed-redelivery"} {
+		for _, stage := range []string{"execute", "verify", "publish"} {
+			want[name+" / "+stage] = "skipped"
+		}
+		want[name+" / assert-denied"] = "success"
+	}
+	return exactJobs(j, want)
+}
+
+func validRecoveryJobs(j jobList) bool {
+	return exactJobs(j, map[string]string{"recover / execute": "skipped", "recover / verify": "success", "recover / publish": "success", "recover / assert-denied": "skipped"})
+}
+
+func exactJobs(j jobList, want map[string]string) bool {
+	if j.TotalCount != len(want) || len(j.Jobs) != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(want))
+	for _, item := range j.Jobs {
+		conclusion, ok := want[item.Name]
+		if !ok || seen[item.Name] || item.Status != "completed" || item.Conclusion != conclusion || item.RunAttempt != 1 {
+			return false
+		}
+		seen[item.Name] = true
+	}
+	return true
+}
+
+func (c client) completedPair(ctx context.Context, branch, branchSHA string) (workflowRun, workflowRun, bool, error) {
+	var list runList
+	path := "/repos/" + consumerRepo + "/actions/workflows/sofa-gate.yml/runs?event=workflow_dispatch&branch=" + url.QueryEscape(branch) + "&per_page=100"
+	if err := c.get(ctx, path, &list); err != nil {
+		return workflowRun{}, workflowRun{}, false, err
+	}
+	if list.TotalCount < 0 || list.TotalCount > 8 || len(list.Runs) != list.TotalCount {
+		return workflowRun{}, workflowRun{}, false, errors.New("suite has invalid or unbounded hosted run history")
+	}
+	var latest workflowRun
+	for _, r := range list.Runs {
+		if r.HeadBranch != branch || r.HeadSHA != branchSHA || r.Event != "workflow_dispatch" || r.Path != workflowPath || r.ID < 1 || r.RunAttempt != 1 || r.CreatedAt.IsZero() {
+			return workflowRun{}, workflowRun{}, false, errors.New("suite hosted run identity invalid")
+		}
+		if latest.ID == 0 || r.CreatedAt.After(latest.CreatedAt) || (r.CreatedAt.Equal(latest.CreatedAt) && r.ID > latest.ID) {
+			latest = r
+		}
+	}
+	if latest.ID == 0 || latest.Status != "completed" || latest.Conclusion != "success" {
+		return workflowRun{}, workflowRun{}, false, nil
+	}
+	if _, err := hostedDuration(latest); err != nil {
+		return workflowRun{}, workflowRun{}, false, err
+	}
+	var recoveredJobs jobList
+	if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", consumerRepo, latest.ID), &recoveredJobs); err != nil {
+		return workflowRun{}, workflowRun{}, false, err
+	}
+	if !validRecoveryJobs(recoveredJobs) {
+		return workflowRun{}, workflowRun{}, false, errors.New("hosted recovery run lacks exact skipped-execute publication graph")
+	}
+	var producer workflowRun
+	for _, r := range list.Runs {
+		if r.ID == latest.ID || !r.CreatedAt.Before(latest.CreatedAt) || r.Conclusion != "failure" || r.Status != "completed" {
+			continue
+		}
+		var candidateJobs jobList
+		if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", consumerRepo, r.ID), &candidateJobs); err != nil {
+			return workflowRun{}, workflowRun{}, false, err
+		}
+		if validFaultJobs(candidateJobs) && (producer.ID == 0 || r.CreatedAt.After(producer.CreatedAt)) {
+			producer = r
+		}
+	}
+	if producer.ID == 0 || latest.CreatedAt.Sub(producer.CreatedAt) > 45*time.Minute {
+		return workflowRun{}, workflowRun{}, false, errors.New("hosted recovery has no bounded failed producer")
+	}
+	if _, err := hostedDuration(producer); err != nil {
+		return workflowRun{}, workflowRun{}, false, err
+	}
+	return producer, latest, true, nil
+}
+
 func (c client) artifactID(ctx context.Context, r workflowRun, name string) (int64, error) {
 	var list artifactList
 	if err := c.get(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/artifacts?per_page=100", consumerRepo, r.ID), &list); err != nil {
@@ -348,7 +431,43 @@ func (c client) denialArtifact(ctx context.Context, r workflowRun, suite string)
 	return files["denial.json"], id, nil
 }
 
+func (c client) conflictArtifact(ctx context.Context, r workflowRun, suite string) ([]byte, int64, error) {
+	id, err := c.artifactID(ctx, r, fmt.Sprintf("sofa-e2e-conflict-%s-%d-%d", suite, r.ID, r.RunAttempt))
+	if err != nil {
+		return nil, 0, err
+	}
+	files, err := c.downloadZIPWithExpected(ctx, id, map[string]bool{"conflict.json": true})
+	if err != nil {
+		return nil, 0, err
+	}
+	return files["conflict.json"], id, nil
+}
+
+func (c client) verifiedArtifact(ctx context.Context, r workflowRun, suite string) (map[string][]byte, int64, error) {
+	id, err := c.artifactID(ctx, r, fmt.Sprintf("sofa-e2e-verified-%s-%d-%d", suite, r.ID, r.RunAttempt))
+	if err != nil {
+		return nil, 0, err
+	}
+	files, err := c.downloadZIPWithExpected(ctx, id, map[string]bool{
+		"transport/config.yml": true, "transport/manifest.json": true, "transport/identity.json": true,
+		"candidate/bundle.json": true, "candidate/execution.json": true, "evidence/checks.json": true,
+	})
+	return files, id, err
+}
+
 func (c client) downloadZIP(ctx context.Context, artifactID int64, denial bool) (map[string][]byte, error) {
+	if denial {
+		return c.downloadZIPWithExpected(ctx, artifactID, map[string]bool{"denial.json": true})
+	}
+	return c.downloadZIPWithExpected(ctx, artifactID, map[string]bool{
+		"transport/identity.json": true, "transport/manifest.json": true,
+		"candidate/execution.json": true, "candidate/bundle.json": true,
+		"evidence/checks.json": true, "report/publication.json": true,
+		"report/scenario.json": true,
+	})
+}
+
+func (c client) downloadZIPWithExpected(ctx context.Context, artifactID int64, want map[string]bool) (map[string][]byte, error) {
 	path := fmt.Sprintf("/repos/%s/actions/artifacts/%d/zip", consumerRepo, artifactID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
@@ -369,12 +488,7 @@ func (c client) downloadZIP(ctx context.Context, artifactID int64, denial bool) 
 	if err != nil || len(zipBytes) > maxArtifactZip {
 		return nil, errors.New("hosted artifact ZIP too large")
 	}
-	if denial {
-		// upload-artifact strips the shared report/ prefix when the upload
-		// path names a single file. The hosted archive contains denial.json.
-		return unpackZIPExpected(zipBytes, map[string]bool{"denial.json": true})
-	}
-	return unpackZIP(zipBytes)
+	return unpackZIPExpected(zipBytes, want)
 }
 
 func unpackZIP(data []byte) (map[string][]byte, error) {
@@ -508,6 +622,68 @@ type denialEvidence struct {
 	ArtifactURL string `json:"artifact_url"`
 }
 
+type conflictReport struct {
+	SchemaVersion    int    `json:"schema_version"`
+	Simulation       string `json:"simulation"`
+	CandidateDigest  string `json:"candidate_digest"`
+	BaseSHA          string `json:"base_sha"`
+	AttemptID        string `json:"attempt_id"`
+	Generation       uint64 `json:"generation"`
+	Branch           string `json:"branch"`
+	ExistingHead     string `json:"existing_head"`
+	HeadAfterReplay  string `json:"head_after_replay"`
+	DeliveryAttempts int    `json:"delivery_attempts"`
+	FakeGitWrites    int    `json:"fake_git_writes"`
+	PRPosts          int    `json:"pr_posts"`
+	ProviderRequests int    `json:"provider_requests"`
+}
+
+func validateConflictArtifact(data []byte, verified validated) error {
+	var r conflictReport
+	if err := decodeStrict(data, &r); err != nil {
+		return err
+	}
+	if r.SchemaVersion != 1 || r.Simulation != "fake-github-transport" || r.CandidateDigest != verified.bundle.CandidateDigest || r.BaseSHA != verified.bundle.BaseSHA || !sha64.MatchString(verified.bundle.AttemptID) || r.AttemptID != verified.bundle.AttemptID || r.Generation != 1 || r.Branch != "sofa/"+verified.bundle.AttemptID[:24] || r.ExistingHead != strings.Repeat("b", 40) || r.HeadAfterReplay != r.ExistingHead || r.DeliveryAttempts != 2 || r.FakeGitWrites != 0 || r.PRPosts != 0 || r.ProviderRequests != 0 {
+		return errors.New("hosted conflict report does not preserve unexpected branch")
+	}
+	return nil
+}
+
+func validateProducerArtifact(retained, recovery map[string][]byte, p pull, producer workflowRun, mainSHA string, verified validated) error {
+	for _, path := range []string{"candidate/bundle.json", "candidate/execution.json", "evidence/checks.json"} {
+		if len(retained[path]) == 0 || !bytes.Equal(retained[path], recovery[path]) {
+			return errors.New("recovered candidate differs from retained producer bytes")
+		}
+	}
+	var original identity
+	if err := decodeStrict(retained["transport/identity.json"], &original); err != nil {
+		return err
+	}
+	if original.Version != 1 || original.SuiteID != suiteID(p, mainSHA) || original.Scenario != "edit" || original.CandidateSHA != p.Head.SHA || original.PRBaseSHA != p.Base.SHA || original.DisposableBaseSHA != mainSHA || original.AttemptID != verified.id.AttemptID || original.Generation != 1 || original.ProducerRunID != "" || original.FakeAgent != "fake-acp" {
+		return errors.New("retained candidate identity differs from recovery")
+	}
+	var manifest struct {
+		Version int `json:"version"`
+		Fence   struct {
+			AttemptID  string `json:"attempt_id"`
+			Generation int64  `json:"generation"`
+			Owner      struct {
+				RunID      string `json:"run_id"`
+				RunAttempt int    `json:"run_attempt"`
+			} `json:"owner"`
+		} `json:"fence"`
+		RecoveryCheckpoint json.RawMessage `json:"recovery_checkpoint"`
+		RecoverySource     json.RawMessage `json:"recovery_source"`
+	}
+	if err := decodeStrict(retained["transport/manifest.json"], &manifest); err != nil {
+		return err
+	}
+	if manifest.Version != 1 || manifest.Fence.AttemptID != original.AttemptID || manifest.Fence.Generation != 1 || manifest.Fence.Owner.RunID != strconv.FormatInt(producer.ID, 10) || manifest.Fence.Owner.RunAttempt != producer.RunAttempt || len(manifest.RecoveryCheckpoint) != 0 || len(manifest.RecoverySource) != 0 {
+		return errors.New("retained producer fence invalid")
+	}
+	return nil
+}
+
 func validateDenialArtifact(data []byte, p pull, r workflowRun, mainSHA, kind string) error {
 	var d denialReport
 	if err := decodeStrict(data, &d); err != nil {
@@ -600,6 +776,10 @@ func hash(b []byte) string {
 }
 
 func validateArtifact(files map[string][]byte, p pull, r workflowRun, mainSHA string, baseContent []byte) (validated, error) {
+	return validateArtifactFor(files, p, r, mainSHA, baseContent, suiteID(p, mainSHA), 1, 0)
+}
+
+func validateArtifactFor(files map[string][]byte, p pull, r workflowRun, mainSHA string, baseContent []byte, suite string, generation int64, producerID int64) (validated, error) {
 	var v validated
 	for _, item := range []struct {
 		name string
@@ -611,11 +791,14 @@ func validateArtifact(files map[string][]byte, p pull, r workflowRun, mainSHA st
 			return v, err
 		}
 	}
-	suite := suiteID(p, mainSHA)
-	if v.id.Version != 1 || v.id.SuiteID != suite || v.id.Scenario != "edit" || v.id.CandidateSHA != p.Head.SHA || v.id.PRBaseSHA != p.Base.SHA || v.id.DisposableBaseSHA != mainSHA || v.id.FakeAgent != "fake-acp" || v.id.Generation != 1 || v.id.ProducerRunID != "" {
+	producer := ""
+	if producerID > 0 {
+		producer = strconv.FormatInt(producerID, 10)
+	}
+	if v.id.Version != 1 || v.id.SuiteID != suite || v.id.Scenario != "edit" || v.id.CandidateSHA != p.Head.SHA || v.id.PRBaseSHA != p.Base.SHA || v.id.DisposableBaseSHA != mainSHA || v.id.FakeAgent != "fake-acp" || v.id.Generation != generation || v.id.ProducerRunID != producer {
 		return v, errors.New("hosted identity does not match current exact suite")
 	}
-	if v.report.SchemaVersion != 1 || v.report.SuiteID != suite || v.report.Scenario != "edit" || v.report.CandidateSHA != p.Head.SHA || v.report.PRBaseSHA != p.Base.SHA || v.report.DisposableBaseSHA != mainSHA || v.report.AttemptID != v.id.AttemptID || v.report.Generation != v.id.Generation || v.report.BundleGeneration != uint64(v.id.Generation) || v.report.ProducerRunID != "" || v.report.FakeAgent != "fake-acp" || v.report.FakePromptRequests != 1 || v.report.ProviderRequests != 0 || v.report.ProviderRequestBasis != "networkless-container-and-fake-peer-without-provider-client" || v.report.SimulatedPRPostCount != 1 || v.report.VerifiedCheckCount != 1 || v.report.RealPublicationOwner != "trusted-disposable-coordinator-only" {
+	if v.report.SchemaVersion != 1 || v.report.SuiteID != suite || v.report.Scenario != "edit" || v.report.CandidateSHA != p.Head.SHA || v.report.PRBaseSHA != p.Base.SHA || v.report.DisposableBaseSHA != mainSHA || v.report.AttemptID != v.id.AttemptID || v.report.Generation != v.id.Generation || v.report.BundleGeneration != 1 || v.report.ProducerRunID != producer || v.report.FakeAgent != "fake-acp" || v.report.FakePromptRequests != 1 || v.report.ProviderRequests != 0 || v.report.ProviderRequestBasis != "networkless-container-and-fake-peer-without-provider-client" || v.report.SimulatedPRPostCount != 1 || v.report.VerifiedCheckCount != 1 || v.report.RealPublicationOwner != "trusted-disposable-coordinator-only" {
 		return v, errors.New("hosted scenario report does not match exact suite")
 	}
 	if v.bundle.Version != 1 || v.bundle.Repository != consumerRepo || v.bundle.AttemptID != v.id.AttemptID || v.bundle.Generation != 1 || v.bundle.BaseSHA != mainSHA || !sha64.MatchString(v.bundle.CandidateDigest) || v.report.CandidateDigest != v.bundle.CandidateDigest || len(v.bundle.Files) != 1 {
@@ -647,12 +830,43 @@ func validateArtifact(files map[string][]byte, p pull, r workflowRun, mainSHA st
 				RunAttempt int    `json:"run_attempt"`
 			} `json:"owner"`
 		} `json:"fence"`
+		RecoveryCheckpoint *struct {
+			Version      int    `json:"version"`
+			Phase        string `json:"phase"`
+			ArtifactID   string `json:"artifact_id"`
+			Digest       string `json:"digest"`
+			CandidateSHA string `json:"candidate_sha"`
+			Producer     struct {
+				RunID      string `json:"run_id"`
+				RunAttempt int    `json:"run_attempt"`
+			} `json:"producer"`
+			Generation int64     `json:"generation"`
+			AcceptedAt time.Time `json:"accepted_at"`
+			ExpiresAt  time.Time `json:"expires_at"`
+		} `json:"recovery_checkpoint"`
+		RecoverySource *struct {
+			RunID      string `json:"run_id"`
+			RunAttempt int    `json:"run_attempt"`
+		} `json:"recovery_source"`
 	}
 	if err := decodeStrict(files["transport/manifest.json"], &manifest); err != nil {
 		return v, err
 	}
-	if manifest.Version != 1 || manifest.Grant.Repository != consumerRepo || manifest.Grant.BaseSHA != mainSHA || manifest.Fence.AttemptID != v.id.AttemptID || manifest.Fence.Generation != 1 || manifest.Fence.Owner.RunID != strconv.FormatInt(r.ID, 10) || manifest.Fence.Owner.RunAttempt != r.RunAttempt {
+	if manifest.Version != 1 || manifest.Grant.Repository != consumerRepo || manifest.Grant.BaseSHA != mainSHA || manifest.Fence.AttemptID != v.id.AttemptID || manifest.Fence.Generation != generation || manifest.Fence.Owner.RunID != strconv.FormatInt(r.ID, 10) || manifest.Fence.Owner.RunAttempt != r.RunAttempt {
 		return v, errors.New("hosted manifest does not bind producing run")
+	}
+	if producerID == 0 {
+		if manifest.RecoveryCheckpoint != nil || manifest.RecoverySource != nil {
+			return v, errors.New("ordinary hosted candidate carries recovery authority")
+		}
+	} else {
+		cp := manifest.RecoveryCheckpoint
+		source := manifest.RecoverySource
+		bundleBytes := files["candidate/bundle.json"]
+		digest := sha256.Sum256(bundleBytes)
+		if generation != 2 || cp == nil || source == nil || cp.Version != 1 || cp.Phase != "validating" || cp.ArtifactID != "sofa-e2e-candidate-"+suite || cp.Digest != hex.EncodeToString(digest[:]) || cp.CandidateSHA != v.bundle.CandidateDigest || cp.Producer.RunID != producer || cp.Producer.RunAttempt != 1 || cp.Generation != 1 || source.RunID != producer || source.RunAttempt != 1 || !cp.ExpiresAt.After(cp.AcceptedAt) || cp.ExpiresAt.Sub(cp.AcceptedAt) > 30*time.Minute {
+			return v, errors.New("retained hosted checkpoint provenance invalid")
+		}
 	}
 	var execution struct {
 		Version         int    `json:"version"`
@@ -939,7 +1153,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil || string(caller) != expectedCaller(p, mainSHA) {
 		return nil // The suite was built against a different disposable base.
 	}
-	r, ready, err := c.completedRun(ctx, branch, branchSHA)
+	producer, r, ready, err := c.completedPair(ctx, branch, branchSHA)
 	if err != nil || !ready {
 		return err
 	}
@@ -951,22 +1165,36 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil {
 		return err
 	}
-	v, err := validateArtifact(files, p, r, mainSHA, baseContent)
+	v, err := validateArtifactFor(files, p, r, mainSHA, baseContent, suite, 2, producer.ID)
 	if err != nil {
 		return err
+	}
+	retained, retainedID, err := c.verifiedArtifact(ctx, producer, suite)
+	if err != nil {
+		return fmt.Errorf("retained verified candidate: %w", err)
+	}
+	if err := validateProducerArtifact(retained, files, p, producer, mainSHA, v); err != nil {
+		return fmt.Errorf("retained verified candidate: %w", err)
+	}
+	conflictData, conflictID, err := c.conflictArtifact(ctx, producer, suite)
+	if err != nil {
+		return fmt.Errorf("branch-conflict artifact: %w", err)
+	}
+	if err := validateConflictArtifact(conflictData, v); err != nil {
+		return fmt.Errorf("branch-conflict artifact: %w", err)
 	}
 	denials := make([]denialEvidence, 0, 2)
 	for _, kind := range []string{"non-ready", "completed-redelivery"} {
 		denialSuite := denialSuiteID(p, mainSHA, kind)
-		data, id, err := c.denialArtifact(ctx, r, denialSuite)
+		data, id, err := c.denialArtifact(ctx, producer, denialSuite)
 		if err != nil {
 			return fmt.Errorf("%s denial artifact: %w", kind, err)
 		}
-		if err := validateDenialArtifact(data, p, r, mainSHA, kind); err != nil {
+		if err := validateDenialArtifact(data, p, producer, mainSHA, kind); err != nil {
 			return fmt.Errorf("%s denial artifact: %w", kind, err)
 		}
 		decision := map[string]string{"non-ready": "admission-denied", "completed-redelivery": "already-completed"}[kind]
-		denials = append(denials, denialEvidence{kind, denialSuite, decision, id, fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, r.ID, id)})
+		denials = append(denials, denialEvidence{kind, denialSuite, decision, id, fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, producer.ID, id)})
 	}
 	current, err := c.currentPR(ctx, p.Number)
 	if err != nil || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
@@ -992,6 +1220,13 @@ func (c client) observe(ctx context.Context, p pull) error {
 			DisposableBaseSHA     string           `json:"disposable_base_sha"`
 			SuiteID               string           `json:"suite_id"`
 			CandidateDigest       string           `json:"candidate_digest"`
+			ProducerRunID         int64            `json:"producer_run_id"`
+			ProducerRunURL        string           `json:"producer_run_url"`
+			ProducerDurationMS    int64            `json:"producer_duration_ms"`
+			RetainedArtifactID    int64            `json:"retained_artifact_id"`
+			ConflictArtifactID    int64            `json:"conflict_artifact_id"`
+			ConflictArtifactURL   string           `json:"conflict_artifact_url"`
+			ConflictBranchHead    string           `json:"conflict_branch_head"`
 			CandidateRunID        int64            `json:"candidate_run_id"`
 			CandidateRunAttempt   int              `json:"candidate_run_attempt"`
 			CandidateRunURL       string           `json:"candidate_run_url"`
@@ -1010,9 +1245,14 @@ func (c client) observe(ctx context.Context, p pull) error {
 			DraftIsDraft          bool             `json:"draft_is_draft"`
 			OwnedResourceState    string           `json:"owned_resource_cleanup_state"`
 		}{
-			SchemaVersion: 3, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
+			SchemaVersion: 4, SofaPR: p.Number, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA,
 			DisposableBaseSHA: mainSHA, SuiteID: suite, CandidateDigest: v.bundle.CandidateDigest,
-			CandidateRunID: r.ID, CandidateRunAttempt: r.RunAttempt,
+			ProducerRunID:      producer.ID,
+			ProducerRunURL:     fmt.Sprintf("https://github.com/%s/actions/runs/%d", consumerRepo, producer.ID),
+			RetainedArtifactID: retainedID, ConflictArtifactID: conflictID,
+			ConflictArtifactURL: fmt.Sprintf("https://github.com/%s/actions/runs/%d/artifacts/%d", consumerRepo, producer.ID, conflictID),
+			ConflictBranchHead:  strings.Repeat("b", 40),
+			CandidateRunID:      r.ID, CandidateRunAttempt: r.RunAttempt,
 			CandidateRunURL:       fmt.Sprintf("https://github.com/%s/actions/runs/%d", consumerRepo, r.ID),
 			CandidateRunStartedAt: r.StartedAt, CandidateRunUpdatedAt: r.UpdatedAt,
 			CandidateDurationMS: durationMS, ReportArtifactID: artifactID, Denials: denials,
@@ -1020,6 +1260,10 @@ func (c client) observe(ctx context.Context, p pull) error {
 			DraftPR:           pr.Number, DraftPRURL: pr.HTMLURL, DraftHeadSHA: pr.Head.SHA,
 			DraftHeadRef: pr.Head.Ref, DraftBaseRef: pr.Base.Ref, DraftState: pr.State,
 			DraftIsDraft: pr.Draft, OwnedResourceState: "retained_for_replay",
+		}
+		result.ProducerDurationMS, err = hostedDuration(producer)
+		if err != nil {
+			return err
 		}
 		encoded, err := json.Marshal(result)
 		if err != nil {
@@ -1049,9 +1293,12 @@ on:
       base_sha: {type: string, required: false}
       source_run_id: {type: string, required: false}
       source_run_attempt: {type: string, required: false}
+      mode: {type: string, required: false}
+      producer_run_id: {type: string, required: false}
 permissions: {}
 jobs:
   candidate:
+    if: inputs.mode == 'initial'
     permissions:
       contents: read
       actions: read
@@ -1063,7 +1310,9 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
+      publish_fault: before-publication
   deny-non-ready:
+    if: inputs.mode == 'initial'
     permissions:
       contents: read
       actions: read
@@ -1077,6 +1326,7 @@ jobs:
       disposable_base_sha: %s
       reconcile_candidate: false
   deny-completed-redelivery:
+    if: inputs.mode == 'initial'
     permissions:
       contents: read
       actions: read
@@ -1089,9 +1339,25 @@ jobs:
       base_sha: %s
       disposable_base_sha: %s
       reconcile_candidate: false
+  recover:
+    if: inputs.mode == 'recovery' && inputs.producer_run_id != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
+    with:
+      suite_id: %s
+      scenario: edit
+      candidate_sha: %s
+      base_sha: %s
+      disposable_base_sha: %s
+      reconcile_candidate: true
+      producer_run_id: ${{ inputs.producer_run_id }}
+      producer_run_attempt: '1'
 `, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase,
 		p.Head.SHA, denialSuiteID(p, consumerBase, "non-ready"), p.Head.SHA, p.Base.SHA, consumerBase,
-		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase)
+		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase,
+		p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
 }
 
 func run(ctx context.Context, c client) error {
