@@ -85,7 +85,8 @@ func testArtifacts(t *testing.T) (map[string][]byte, pull, workflowRun, string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := report{SchemaVersion: 1, SuiteID: id.SuiteID, Scenario: "edit", CandidateSHA: id.CandidateSHA, PRBaseSHA: id.PRBaseSHA, DisposableBaseSHA: mainSHA, AttemptID: id.AttemptID, Generation: 1, BundleGeneration: 1, CandidateDigest: b.CandidateDigest, FakeAgent: "fake-acp", FakePromptRequests: 1, ProviderRequests: 0, ProviderRequestBasis: "networkless-container-and-fake-peer-without-provider-client", SimulatedPRNumber: 1, SimulatedPRPostCount: 1, VerifiedCheckCount: 1, RealPublicationOwner: "trusted-disposable-coordinator-only"}
+	zero := uint64(0)
+	report := report{SchemaVersion: 2, SuiteID: id.SuiteID, Scenario: "edit", CandidateSHA: id.CandidateSHA, PRBaseSHA: id.PRBaseSHA, DisposableBaseSHA: mainSHA, AttemptID: id.AttemptID, Generation: 1, BundleGeneration: 1, CandidateDigest: b.CandidateDigest, FakeAgent: "fake-acp", FakePromptRequests: 1, ProviderRequests: 0, ProviderRequestBasis: "measured-zero-network-tx-packets-in-networkless-fake-peer", NetworkTXPackets: &zero, NetworkMeasurementSource: "proc-net-dev", SimulatedPRNumber: 1, SimulatedPRPostCount: 1, VerifiedCheckCount: 1, RealPublicationOwner: "trusted-disposable-coordinator-only"}
 	marshal := func(v any) []byte {
 		data, err := json.Marshal(v)
 		if err != nil {
@@ -103,6 +104,7 @@ func testArtifacts(t *testing.T) (map[string][]byte, pull, workflowRun, string, 
 			"fence":   map[string]any{"attempt_id": id.AttemptID, "generation": 1, "owner": map[string]any{"run_id": "42", "run_attempt": 1}},
 		}),
 		"candidate/execution.json": marshal(map[string]any{"version": 1, "used_agent": true, "prompt_requests": 1, "model_calls": nil, "candidate_digest": b.CandidateDigest}),
+		"candidate/network.json":   marshal(map[string]any{"schema_version": 1, "network_mode": "none", "source": "proc-net-dev", "tx_packets_before": 42, "tx_packets_after": 42, "tx_packets_delta": 0}),
 		"evidence/checks.json":     marshal([]map[string]any{{"version": 1, "name": "go-test", "candidate_digest": b.CandidateDigest, "passed": true}}),
 		"report/publication.json":  marshal(map[string]any{"schema_version": 1, "simulation": "fake-github-transport", "candidate_digest": b.CandidateDigest, "base_sha": mainSHA, "attempt_id": id.AttemptID, "generation": 1, "pr_number": 1, "pr_posts": 1, "provider_requests": 0}),
 	}
@@ -136,6 +138,47 @@ func TestValidateArtifactRejectsHostileOrStaleData(t *testing.T) {
 		{"model calls claimed", func(f map[string][]byte) {
 			f["candidate/execution.json"] = bytes.ReplaceAll(f["candidate/execution.json"], []byte(`"model_calls":null`), []byte(`"model_calls":1`))
 		}},
+		{"missing network file", func(f map[string][]byte) { delete(f, "candidate/network.json") }},
+		{"missing network mode", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"network_mode":"none",`), nil)
+		}},
+		{"network mode enabled", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"network_mode":"none"`), []byte(`"network_mode":"bridge"`))
+		}},
+		{"network source wrong", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"source":"proc-net-dev"`), []byte(`"source":"self-report"`))
+		}},
+		{"before counter missing", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`,"tx_packets_before":42`), nil)
+		}},
+		{"after counter missing", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`,"tx_packets_after":42`), nil)
+		}},
+		{"delta missing", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`,"tx_packets_delta":0`), nil)
+		}},
+		{"tx packet observed", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"tx_packets_after":42`), []byte(`"tx_packets_after":43`))
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"tx_packets_delta":0`), []byte(`"tx_packets_delta":1`))
+		}},
+		{"inconsistent delta", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"tx_packets_after":42`), []byte(`"tx_packets_after":43`))
+		}},
+		{"counter decreased", func(f map[string][]byte) {
+			f["candidate/network.json"] = bytes.ReplaceAll(f["candidate/network.json"], []byte(`"tx_packets_after":42`), []byte(`"tx_packets_after":41`))
+		}},
+		{"network report count missing", func(f map[string][]byte) {
+			f["report/scenario.json"] = bytes.ReplaceAll(f["report/scenario.json"], []byte(`"network_tx_packets":0,`), nil)
+		}},
+		{"network report count changed", func(f map[string][]byte) {
+			f["report/scenario.json"] = bytes.ReplaceAll(f["report/scenario.json"], []byte(`"network_tx_packets":0`), []byte(`"network_tx_packets":1`))
+		}},
+		{"network report source changed", func(f map[string][]byte) {
+			f["report/scenario.json"] = bytes.ReplaceAll(f["report/scenario.json"], []byte(`"network_measurement_source":"proc-net-dev"`), []byte(`"network_measurement_source":"self-report"`))
+		}},
+		{"old report schema", func(f map[string][]byte) {
+			f["report/scenario.json"] = bytes.ReplaceAll(f["report/scenario.json"], []byte(`"schema_version":2`), []byte(`"schema_version":1`))
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			copyFiles := make(map[string][]byte, len(files))
@@ -147,6 +190,25 @@ func TestValidateArtifactRejectsHostileOrStaleData(t *testing.T) {
 				t.Fatal("hostile artifact accepted")
 			}
 		})
+	}
+}
+
+func TestRecoveredNetworkMeasurementMustMatchRetainedBytes(t *testing.T) {
+	files, p, r, mainSHA, base := testArtifacts(t)
+	v, err := validateArtifact(files, p, r, mainSHA, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := make(map[string][]byte, len(files))
+	for path, data := range files {
+		retained[path] = append([]byte(nil), data...)
+	}
+	if err := validateProducerArtifact(retained, files, p, r, mainSHA, v); err != nil {
+		t.Fatal(err)
+	}
+	retained["candidate/network.json"] = bytes.ReplaceAll(retained["candidate/network.json"], []byte(`"tx_packets_before":42`), []byte(`"tx_packets_before":43`))
+	if err := validateProducerArtifact(retained, files, p, r, mainSHA, v); err == nil {
+		t.Fatal("recovered report accepted against a different retained network measurement")
 	}
 }
 
@@ -216,9 +278,15 @@ func TestUnpackZIPRequiresExactBoundedEntries(t *testing.T) {
 		}
 		return buf.Bytes()
 	}
-	if got, err := unpackZIP(makeZIP("")); err != nil || len(got) != 7 {
+	if got, err := unpackZIP(makeZIP("")); err != nil || len(got) != 8 {
 		t.Fatalf("valid archive rejected: %v", err)
 	}
+	networkEvidence := files["candidate/network.json"]
+	delete(files, "candidate/network.json")
+	if _, err := unpackZIP(makeZIP("")); err == nil {
+		t.Fatal("report ZIP without the network measurement accepted")
+	}
+	files["candidate/network.json"] = networkEvidence
 	for _, extra := range []string{"../outside", "other.json", "candidate/bundle.json"} {
 		if _, err := unpackZIP(makeZIP(extra)); err == nil {
 			t.Fatalf("accepted extra or duplicate entry %q", extra)
@@ -557,7 +625,7 @@ func TestPilotArtifactWhenPresent(t *testing.T) {
 		t.Skip("optional exact hosted pilot artifact path not supplied")
 	}
 	files := map[string][]byte{}
-	for _, path := range []string{"transport/identity.json", "transport/manifest.json", "candidate/execution.json", "candidate/bundle.json", "evidence/checks.json", "report/publication.json", "report/scenario.json"} {
+	for _, path := range []string{"transport/identity.json", "transport/manifest.json", "candidate/execution.json", "candidate/bundle.json", "candidate/network.json", "evidence/checks.json", "report/publication.json", "report/scenario.json"} {
 		content, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil {
 			t.Fatal(err)

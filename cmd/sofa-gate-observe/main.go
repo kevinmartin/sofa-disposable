@@ -30,7 +30,7 @@ const (
 	workflowPath          = ".github/workflows/sofa-gate.yml"
 	candidateWorkflowPath = ".github/workflows/e2e-fake.yml"
 	// These reported commands are valid only for this reviewed candidate workflow.
-	candidateWorkflowHash = "3a4327830224e13c88763d0d8fb3a9cbd676d2398d6d4f792b57844b352fad50"
+	candidateWorkflowHash = "1f42dba8dfccd5d450c1f9596cc740a8682f93ba909a19effe5d0817942eab84"
 	fixturePath           = "fixture/greeting.go"
 	maxArtifactZip        = 8 << 20
 )
@@ -532,7 +532,7 @@ func (c client) verifiedArtifact(ctx context.Context, r workflowRun, suite strin
 	}
 	files, err := c.downloadZIPWithExpected(ctx, id, map[string]bool{
 		"transport/config.yml": true, "transport/manifest.json": true, "transport/identity.json": true,
-		"candidate/bundle.json": true, "candidate/execution.json": true, "evidence/checks.json": true,
+		"candidate/bundle.json": true, "candidate/execution.json": true, "candidate/network.json": true, "evidence/checks.json": true,
 	})
 	return files, id, err
 }
@@ -543,7 +543,7 @@ func (c client) downloadZIP(ctx context.Context, artifactID int64, denial bool) 
 	}
 	return c.downloadZIPWithExpected(ctx, artifactID, map[string]bool{
 		"transport/identity.json": true, "transport/manifest.json": true,
-		"candidate/execution.json": true, "candidate/bundle.json": true,
+		"candidate/execution.json": true, "candidate/bundle.json": true, "candidate/network.json": true,
 		"evidence/checks.json": true, "report/publication.json": true,
 		"report/scenario.json": true,
 	})
@@ -576,7 +576,7 @@ func (c client) downloadZIPWithExpected(ctx context.Context, artifactID int64, w
 func unpackZIP(data []byte) (map[string][]byte, error) {
 	return unpackZIPExpected(data, map[string]bool{
 		"transport/identity.json": true, "transport/manifest.json": true,
-		"candidate/execution.json": true, "candidate/bundle.json": true,
+		"candidate/execution.json": true, "candidate/bundle.json": true, "candidate/network.json": true,
 		"evidence/checks.json": true, "report/publication.json": true,
 		"report/scenario.json": true,
 	})
@@ -649,26 +649,28 @@ type identity struct {
 }
 
 type report struct {
-	SchemaVersion        int    `json:"schema_version"`
-	SuiteID              string `json:"suite_id"`
-	Scenario             string `json:"scenario"`
-	CandidateSHA         string `json:"candidate_sha"`
-	PRBaseSHA            string `json:"pr_base_sha"`
-	DisposableBaseSHA    string `json:"disposable_base_sha"`
-	AttemptID            string `json:"attempt_id"`
-	Generation           int64  `json:"generation"`
-	BundleGeneration     uint64 `json:"bundle_generation"`
-	ProducerRunID        string `json:"producer_run_id"`
-	CandidateDigest      string `json:"candidate_digest"`
-	FakeAgent            string `json:"fake_agent"`
-	FakePromptRequests   int    `json:"fake_prompt_requests"`
-	ProviderRequests     int    `json:"provider_requests"`
-	ProviderRequestBasis string `json:"provider_request_basis"`
-	SimulatedPRNumber    int64  `json:"simulated_pr_number"`
-	SimulatedPRURL       string `json:"simulated_pr_url"`
-	SimulatedPRPostCount int    `json:"simulated_pr_post_count"`
-	VerifiedCheckCount   int    `json:"verified_check_count"`
-	RealPublicationOwner string `json:"real_publication_owner"`
+	SchemaVersion            int     `json:"schema_version"`
+	SuiteID                  string  `json:"suite_id"`
+	Scenario                 string  `json:"scenario"`
+	CandidateSHA             string  `json:"candidate_sha"`
+	PRBaseSHA                string  `json:"pr_base_sha"`
+	DisposableBaseSHA        string  `json:"disposable_base_sha"`
+	AttemptID                string  `json:"attempt_id"`
+	Generation               int64   `json:"generation"`
+	BundleGeneration         uint64  `json:"bundle_generation"`
+	ProducerRunID            string  `json:"producer_run_id"`
+	CandidateDigest          string  `json:"candidate_digest"`
+	FakeAgent                string  `json:"fake_agent"`
+	FakePromptRequests       int     `json:"fake_prompt_requests"`
+	ProviderRequests         int     `json:"provider_requests"`
+	ProviderRequestBasis     string  `json:"provider_request_basis"`
+	NetworkTXPackets         *uint64 `json:"network_tx_packets"`
+	NetworkMeasurementSource string  `json:"network_measurement_source"`
+	SimulatedPRNumber        int64   `json:"simulated_pr_number"`
+	SimulatedPRURL           string  `json:"simulated_pr_url"`
+	SimulatedPRPostCount     int     `json:"simulated_pr_post_count"`
+	VerifiedCheckCount       int     `json:"verified_check_count"`
+	RealPublicationOwner     string  `json:"real_publication_owner"`
 }
 
 type validated struct {
@@ -732,7 +734,7 @@ func validateConflictArtifact(data []byte, verified validated) error {
 }
 
 func validateProducerArtifact(retained, recovery map[string][]byte, p pull, producer workflowRun, mainSHA string, verified validated) error {
-	for _, path := range []string{"candidate/bundle.json", "candidate/execution.json", "evidence/checks.json"} {
+	for _, path := range []string{"candidate/bundle.json", "candidate/execution.json", "candidate/network.json", "evidence/checks.json"} {
 		if len(retained[path]) == 0 || !bytes.Equal(retained[path], recovery[path]) {
 			return errors.New("recovered candidate differs from retained producer bytes")
 		}
@@ -880,8 +882,27 @@ func validateArtifactFor(files map[string][]byte, p pull, r workflowRun, mainSHA
 	if v.id.Version != 1 || v.id.SuiteID != suite || v.id.Scenario != "edit" || v.id.CandidateSHA != p.Head.SHA || v.id.PRBaseSHA != p.Base.SHA || v.id.DisposableBaseSHA != mainSHA || v.id.FakeAgent != "fake-acp" || v.id.Generation != generation || v.id.ProducerRunID != producer {
 		return v, errors.New("hosted identity does not match current exact suite")
 	}
-	if v.report.SchemaVersion != 1 || v.report.SuiteID != suite || v.report.Scenario != "edit" || v.report.CandidateSHA != p.Head.SHA || v.report.PRBaseSHA != p.Base.SHA || v.report.DisposableBaseSHA != mainSHA || v.report.AttemptID != v.id.AttemptID || v.report.Generation != v.id.Generation || v.report.BundleGeneration != 1 || v.report.ProducerRunID != producer || v.report.FakeAgent != "fake-acp" || v.report.FakePromptRequests != 1 || v.report.ProviderRequests != 0 || v.report.ProviderRequestBasis != "networkless-container-and-fake-peer-without-provider-client" || v.report.SimulatedPRPostCount != 1 || v.report.VerifiedCheckCount != 1 || v.report.RealPublicationOwner != "trusted-disposable-coordinator-only" {
+	if v.report.SchemaVersion != 2 || v.report.SuiteID != suite || v.report.Scenario != "edit" || v.report.CandidateSHA != p.Head.SHA || v.report.PRBaseSHA != p.Base.SHA || v.report.DisposableBaseSHA != mainSHA || v.report.AttemptID != v.id.AttemptID || v.report.Generation != v.id.Generation || v.report.BundleGeneration != 1 || v.report.ProducerRunID != producer || v.report.FakeAgent != "fake-acp" || v.report.FakePromptRequests != 1 || v.report.ProviderRequests != 0 || v.report.ProviderRequestBasis != "measured-zero-network-tx-packets-in-networkless-fake-peer" || v.report.SimulatedPRPostCount != 1 || v.report.VerifiedCheckCount != 1 || v.report.RealPublicationOwner != "trusted-disposable-coordinator-only" {
 		return v, errors.New("hosted scenario report does not match exact suite")
+	}
+	var network struct {
+		SchemaVersion   int     `json:"schema_version"`
+		NetworkMode     string  `json:"network_mode"`
+		Source          string  `json:"source"`
+		TXPacketsBefore *uint64 `json:"tx_packets_before"`
+		TXPacketsAfter  *uint64 `json:"tx_packets_after"`
+		TXPacketsDelta  *uint64 `json:"tx_packets_delta"`
+	}
+	if err := decodeStrict(files["candidate/network.json"], &network); err != nil {
+		return v, err
+	}
+	if network.SchemaVersion != 1 || network.NetworkMode != "none" || network.Source != "proc-net-dev" ||
+		network.TXPacketsBefore == nil || network.TXPacketsAfter == nil || network.TXPacketsDelta == nil ||
+		*network.TXPacketsAfter < *network.TXPacketsBefore ||
+		*network.TXPacketsAfter-*network.TXPacketsBefore != *network.TXPacketsDelta || *network.TXPacketsDelta != 0 ||
+		v.report.NetworkTXPackets == nil || *v.report.NetworkTXPackets != *network.TXPacketsDelta ||
+		v.report.NetworkMeasurementSource != network.Source {
+		return v, errors.New("hosted zero-network measurement invalid")
 	}
 	if v.bundle.Version != 1 || v.bundle.Repository != consumerRepo || v.bundle.AttemptID != v.id.AttemptID || v.bundle.Generation != 1 || v.bundle.BaseSHA != mainSHA || !sha64.MatchString(v.bundle.CandidateDigest) || v.report.CandidateDigest != v.bundle.CandidateDigest || len(v.bundle.Files) != 1 {
 		return v, errors.New("hosted candidate identity or file count invalid")
