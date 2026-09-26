@@ -47,6 +47,7 @@ func completionWakeContract(data, wakeup []byte) error {
 		"uses: ./.github/workflows/sofa-gate.yml",
 		"secrets: inherit",
 		"actions: write",
+		"issues: write",
 	} {
 		if !strings.Contains(wake, required) {
 			return fmt.Errorf("trusted completion wake missing %q", required)
