@@ -74,6 +74,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOFA_DISPOSABLE_WORKFLOW_TOKEN: ${{ secrets.SOFA_DISPOSABLE_WORKFLOW_TOKEN }}
+          SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
           SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
           SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}
@@ -116,6 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}
+          SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}
           SOFA_GATE_RESULT_PATH: gate-results.jsonl
         run: go run ./cmd/sofa-gate-observe
