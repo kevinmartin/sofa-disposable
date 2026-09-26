@@ -25,11 +25,14 @@ import (
 )
 
 const (
-	sofaRepo       = "kevinmartin/sofa"
-	consumerRepo   = "kevinmartin/sofa-disposable"
-	workflowPath   = ".github/workflows/sofa-gate.yml"
-	fixturePath    = "fixture/greeting.go"
-	maxArtifactZip = 8 << 20
+	sofaRepo              = "kevinmartin/sofa"
+	consumerRepo          = "kevinmartin/sofa-disposable"
+	workflowPath          = ".github/workflows/sofa-gate.yml"
+	candidateWorkflowPath = ".github/workflows/e2e-fake.yml"
+	// These reported commands are valid only for this reviewed candidate workflow.
+	candidateWorkflowHash = "3a4327830224e13c88763d0d8fb3a9cbd676d2398d6d4f792b57844b352fad50"
+	fixturePath           = "fixture/greeting.go"
+	maxArtifactZip        = 8 << 20
 )
 
 var sha40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -177,6 +180,25 @@ func (c client) content(ctx context.Context, path, ref string) ([]byte, error) {
 		return nil, errors.New("GitHub content encoding or size invalid")
 	}
 	return base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
+}
+
+func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, wantHash string) error {
+	if !sha40.MatchString(candidateSHA) {
+		return errors.New("candidate workflow revision invalid")
+	}
+	var item gitContent
+	path := "/repos/" + sofaRepo + "/contents/" + candidateWorkflowPath + "?ref=" + candidateSHA
+	if err := c.get(ctx, path, &item); err != nil {
+		return err
+	}
+	if item.Encoding != "base64" || len(item.Content) > 2<<20 {
+		return errors.New("candidate workflow content unavailable")
+	}
+	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
+	if err != nil || hash(content) != wantHash {
+		return errors.New("candidate workflow command pin changed")
+	}
+	return nil
 }
 
 type workflowRun struct {
@@ -1219,6 +1241,9 @@ func (c client) observe(ctx context.Context, p pull) error {
 	}
 	scenarios, err := c.scenarioEvidence(ctx, producer, r)
 	if err != nil {
+		return err
+	}
+	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, candidateWorkflowHash); err != nil {
 		return err
 	}
 	files, artifactID, err := c.reportArtifact(ctx, r, suite)
