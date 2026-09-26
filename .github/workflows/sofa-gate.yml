@@ -118,21 +118,82 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}
-          SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}
           SOFA_GATE_RESULT_PATH: gate-results.jsonl
-        run: go run ./cmd/sofa-gate-observe
+        run: |
+          : > gate-results.jsonl
+          go run ./cmd/sofa-gate-observe
       - name: Carry trusted validated gate results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sofa-e2e-observed-${{ github.run_id }}-${{ github.run_attempt }}
           path: gate-results.jsonl
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 7
-      - name: Publish App-sourced sofa status for validated results
-        if: hashFiles('gate-results.jsonl') != ''
+
+  complete-project:
+    needs: observe
+    if: needs.observe.result == 'success' && github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main'
+    environment: sofa-gate-coordinator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Check out trusted Project lifecycle
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download exact trusted observer report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sofa-e2e-observed-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Complete exact suite-owned issue and Project item
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
+        run: go run ./cmd/sofa-gate-project-complete
+      - name: Carry trusted completed Project result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sofa-e2e-complete-${{ github.run_id }}-${{ github.run_attempt }}
+          path: gate-results-complete.jsonl
+          if-no-files-found: error
+          retention-days: 7
+
+  status:
+    needs: complete-project
+    if: needs.complete-project.result == 'success' && github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main'
+    environment: sofa-gate-coordinator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out trusted status writer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download exact completed Project result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sofa-e2e-complete-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Publish App-sourced sofa status for completed results
         env:
           SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
           SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
-          SOFA_GATE_RESULT_PATH: gate-results.jsonl
+          SOFA_GATE_RESULT_PATH: gate-results-complete.jsonl
         run: go run ./cmd/sofa-gate-status

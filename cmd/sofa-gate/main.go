@@ -37,6 +37,22 @@ var errSuiteCompleted = errors.New("hosted suite already completed")
 
 type fixtureGate interface {
 	EnsureReady(context.Context, fixturelifecycle.Suite) (fixturelifecycle.Resource, error)
+	Verify(context.Context, fixturelifecycle.Suite) (fixturelifecycle.Resource, error)
+}
+
+func readyOrCompleted(ctx context.Context, gate fixtureGate, suite fixturelifecycle.Suite) (bool, error) {
+	if resource, err := gate.EnsureReady(ctx, suite); err == nil {
+		if resource.Closed || resource.Archived || resource.IssueNumber < 1 || resource.ProjectItem == "" {
+			return false, errors.New("suite test item is not Ready")
+		}
+		return true, nil
+	} else {
+		resource, verifyErr := gate.Verify(ctx, suite)
+		if verifyErr == nil && resource.Closed && resource.Archived && resource.IssueNumber > 0 && resource.ProjectItem != "" {
+			return false, nil
+		}
+		return false, err
+	}
 }
 
 type api struct {
@@ -731,11 +747,16 @@ func run(ctx context.Context, a api) error {
 			return errors.New("disposable base changed before test item setup")
 		}
 		fixture := fixturelifecycle.Suite{ID: suiteID(p, mainRef.Object.SHA), CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA, DisposableBaseSHA: mainRef.Object.SHA}
-		if _, err := a.fixtureWriter().EnsureReady(ctx, fixture); err != nil {
+		ready, err := readyOrCompleted(ctx, a.fixtureWriter(), fixture)
+		if err != nil {
 			if publishErr := a.publishFailure(ctx, p, suiteDescription(fixture.ID, gatestatus.Failure), coordinatorRunURL()); publishErr != nil {
 				return fmt.Errorf("suite Project setup failed (%v) and failure status unavailable: %w", err, publishErr)
 			}
 			return fmt.Errorf("suite Project setup failed: %w", err)
+		}
+		if !ready {
+			fmt.Printf("PR %d exact suite test item is complete; awaiting trusted observer replay\n", p.Number)
+			continue
 		}
 		if err := a.dispatchOnce(ctx, p, branch); err != nil {
 			if manual == "" && errors.Is(err, errRetryBudget) {

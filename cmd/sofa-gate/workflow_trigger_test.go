@@ -129,6 +129,50 @@ func TestCompletionWakeUsesTrustedDefaultBranchOnly(t *testing.T) {
 	}
 }
 
+func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/sofa-gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	names := []string{"coordinate", "observe", "complete-project", "status"}
+	jobs := make(map[string]string, len(names))
+	for i, name := range names {
+		start := strings.Index(text, "\n  "+name+":\n")
+		if start < 0 {
+			t.Fatalf("trusted %s job missing", name)
+		}
+		end := len(text)
+		if i+1 < len(names) {
+			end = strings.Index(text, "\n  "+names[i+1]+":\n")
+		}
+		if end <= start {
+			t.Fatalf("trusted %s job boundary invalid", name)
+		}
+		jobs[name] = text[start:end]
+	}
+	if !strings.Contains(jobs["observe"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["complete-project"], "SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}") || !strings.Contains(jobs["status"], "SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}") {
+		t.Fatal("trusted credential owner job missing")
+	}
+	for _, tc := range []struct {
+		name      string
+		forbidden []string
+	}{
+		{"observe", []string{"SOFA_PROJECTS_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY", "issues: write"}},
+		{"complete-project", []string{"SOFA_PUBLISH_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY"}},
+		{"status", []string{"SOFA_PUBLISH_TOKEN", "SOFA_PROJECTS_TOKEN", "issues: write"}},
+	} {
+		for _, secret := range tc.forbidden {
+			if strings.Contains(jobs[tc.name], secret) {
+				t.Fatalf("%s job gained %s", tc.name, secret)
+			}
+		}
+	}
+	if !strings.Contains(jobs["complete-project"], "needs: observe") || !strings.Contains(jobs["status"], "needs: complete-project") || !strings.Contains(jobs["status"], "SOFA_GATE_RESULT_PATH: gate-results-complete.jsonl") {
+		t.Fatal("Project cleanup no longer precedes App success")
+	}
+}
+
 func TestCompletionWakeDiscoversLivePRsInsteadOfUsingEventIdentity(t *testing.T) {
 	t.Setenv("GITHUB_EVENT_NAME", "workflow_run")
 	t.Setenv("GITHUB_EVENT_PATH", t.TempDir()+"/absent-event.json")

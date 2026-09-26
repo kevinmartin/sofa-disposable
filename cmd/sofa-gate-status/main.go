@@ -37,6 +37,10 @@ type observed struct {
 	ConflictArtifactID    int64     `json:"conflict_artifact_id"`
 	ConflictArtifactURL   string    `json:"conflict_artifact_url"`
 	ConflictBranchHead    string    `json:"conflict_branch_head"`
+	TestIssue             int       `json:"test_issue"`
+	TestIssueURL          string    `json:"test_issue_url"`
+	ProjectItem           string    `json:"project_item"`
+	TestItemState         string    `json:"test_item_state"`
 	CandidateRunID        int64     `json:"candidate_run_id"`
 	CandidateRunAttempt   int       `json:"candidate_run_attempt"`
 	CandidateRunURL       string    `json:"candidate_run_url"`
@@ -63,13 +67,14 @@ type observed struct {
 }
 
 func validObserved(r observed) bool {
-	if r.SchemaVersion != 4 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.ProducerRunID < 1 || r.CandidateRunID <= r.ProducerRunID || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.RetainedArtifactID < 1 || r.ConflictArtifactID < 1 || r.ConflictArtifactID == r.RetainedArtifactID || r.DraftPR < 1 || r.ConflictBranchHead != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+	if r.SchemaVersion != 4 || r.SofaPR < 1 || !sha40.MatchString(r.CandidateSHA) || !sha40.MatchString(r.PRBaseSHA) || !sha40.MatchString(r.DisposableBaseSHA) || !sha40.MatchString(r.DraftHeadSHA) || !sha64.MatchString(r.CandidateDigest) || !suitePattern.MatchString(r.SuiteID) || r.ProducerRunID < 1 || r.CandidateRunID <= r.ProducerRunID || r.CandidateRunAttempt != 1 || r.ReportArtifactID < 1 || r.RetainedArtifactID < 1 || r.ConflictArtifactID < 1 || r.ConflictArtifactID == r.RetainedArtifactID || r.DraftPR < 1 || r.ConflictBranchHead != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || r.TestIssue < 1 || r.ProjectItem == "" || r.TestItemState != "closed_archived" {
 		return false
 	}
 	if r.CandidateRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.CandidateRunID) ||
 		r.ProducerRunURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.ProducerRunID) ||
 		r.ReportArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.CandidateRunID, r.ReportArtifactID) ||
 		r.ConflictArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.ProducerRunID, r.ConflictArtifactID) ||
+		r.TestIssueURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/issues/%d", r.TestIssue) ||
 		r.DraftPRURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/pull/%d", r.DraftPR) ||
 		r.DraftHeadRef != "sofa-e2e-result/"+r.SuiteID || r.DraftBaseRef != "main" || r.DraftState != "open" || !r.DraftIsDraft || r.OwnedResourceState != "retained_for_replay" {
 		return false
