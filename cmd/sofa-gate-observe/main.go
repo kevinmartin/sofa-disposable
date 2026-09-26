@@ -359,7 +359,7 @@ func (c client) completedRun(ctx context.Context, branch, branchSHA string) (wor
 }
 
 func validJobs(j jobList) bool {
-	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "success", "candidate / assert-denied": "skipped"}
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "success", "candidate / assert-denied": "skipped", "recover": "skipped"}
 	for _, job := range []string{"deny-non-ready", "deny-completed-redelivery"} {
 		for _, skipped := range []string{"execute", "verify", "publish"} {
 			want[job+" / "+skipped] = "skipped"
@@ -386,7 +386,7 @@ func validJobs(j jobList) bool {
 }
 
 func validFaultJobs(j jobList) bool {
-	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped"}
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped", "recover": "skipped"}
 	for _, name := range []string{"deny-non-ready", "deny-completed-redelivery"} {
 		for _, stage := range []string{"execute", "verify", "publish"} {
 			want[name+" / "+stage] = "skipped"
@@ -397,7 +397,7 @@ func validFaultJobs(j jobList) bool {
 }
 
 func validRecoveryJobs(j jobList) bool {
-	return exactJobs(j, map[string]string{"recover / execute": "skipped", "recover / verify": "success", "recover / publish": "success", "recover / assert-denied": "skipped"})
+	return exactJobs(j, map[string]string{"candidate": "skipped", "deny-non-ready": "skipped", "deny-completed-redelivery": "skipped", "recover / execute": "skipped", "recover / verify": "success", "recover / publish": "success", "recover / assert-denied": "skipped"})
 }
 
 func exactJobs(j jobList, want map[string]string) bool {

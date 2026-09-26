@@ -253,7 +253,7 @@ func TestDenialZIPUsesHostedSingleFileLayout(t *testing.T) {
 
 func expectedJobs() jobList {
 	want := []struct{ name, conclusion string }{
-		{"candidate / execute", "success"}, {"candidate / verify", "success"}, {"candidate / publish", "success"}, {"candidate / assert-denied", "skipped"},
+		{"candidate / execute", "success"}, {"candidate / verify", "success"}, {"candidate / publish", "success"}, {"candidate / assert-denied", "skipped"}, {"recover", "skipped"},
 	}
 	for _, job := range []string{"deny-non-ready", "deny-completed-redelivery"} {
 		for _, name := range []string{"execute", "verify", "publish"} {
@@ -278,7 +278,10 @@ func TestScenarioEvidenceRequiresTimedExactJobs(t *testing.T) {
 			fault.Jobs[i].Conclusion = "failure"
 		}
 	}
-	recovery := jobList{TotalCount: 4, Jobs: []hostedJob{
+	recovery := jobList{TotalCount: 7, Jobs: []hostedJob{
+		{Name: "candidate", Status: "completed", Conclusion: "skipped", RunAttempt: 1},
+		{Name: "deny-non-ready", Status: "completed", Conclusion: "skipped", RunAttempt: 1},
+		{Name: "deny-completed-redelivery", Status: "completed", Conclusion: "skipped", RunAttempt: 1},
 		{Name: "recover / execute", Status: "completed", Conclusion: "skipped", RunAttempt: 1},
 		{Name: "recover / verify", Status: "completed", Conclusion: "success", RunAttempt: 1},
 		{Name: "recover / publish", Status: "completed", Conclusion: "success", RunAttempt: 1, StartedAt: start, CompletedAt: start.Add(9 * time.Second)},

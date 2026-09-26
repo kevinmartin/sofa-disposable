@@ -20,6 +20,50 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestHostedScenarioJobShapeIncludesSkippedCallerJobs(t *testing.T) {
+	decode := func(names map[string]string) suiteJobs {
+		t.Helper()
+		payload := struct {
+			TotalCount int              `json:"total_count"`
+			Jobs       []map[string]any `json:"jobs"`
+		}{TotalCount: len(names)}
+		for name, conclusion := range names {
+			payload.Jobs = append(payload.Jobs, map[string]any{"name": name, "status": "completed", "conclusion": conclusion, "run_attempt": 1})
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var jobs suiteJobs
+		if err := json.Unmarshal(data, &jobs); err != nil {
+			t.Fatal(err)
+		}
+		return jobs
+	}
+	fault := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped", "recover": "skipped"}
+	for _, name := range []string{"deny-non-ready", "deny-completed-redelivery"} {
+		for _, stage := range []string{"execute", "verify", "publish"} {
+			fault[name+" / "+stage] = "skipped"
+		}
+		fault[name+" / assert-denied"] = "success"
+	}
+	if !initialFaultJobs(decode(fault)) {
+		t.Fatal("GitHub's completed first-run job graph was rejected")
+	}
+	delete(fault, "recover")
+	if initialFaultJobs(decode(fault)) {
+		t.Fatal("missing skipped recovery caller was accepted")
+	}
+	recovery := map[string]string{"candidate": "skipped", "deny-non-ready": "skipped", "deny-completed-redelivery": "skipped", "recover / execute": "skipped", "recover / verify": "success", "recover / publish": "success", "recover / assert-denied": "skipped"}
+	if !recoveryJobs(decode(recovery)) {
+		t.Fatal("GitHub's recovery job graph was rejected")
+	}
+	recovery["candidate"] = "success"
+	if recoveryJobs(decode(recovery)) {
+		t.Fatal("executed initial caller was accepted as recovery")
+	}
+}
+
 type fakeGateStatus struct {
 	latest        gatestatus.Snapshot
 	latestErr     error

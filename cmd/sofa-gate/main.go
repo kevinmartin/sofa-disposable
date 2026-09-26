@@ -443,7 +443,7 @@ func (a api) suiteJobs(ctx context.Context, id int64) (suiteJobs, error) {
 }
 
 func initialFaultJobs(j suiteJobs) bool {
-	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped"}
+	want := map[string]string{"candidate / execute": "success", "candidate / verify": "success", "candidate / publish": "failure", "candidate / assert-denied": "skipped", "recover": "skipped"}
 	for _, prefix := range []string{"deny-non-ready", "deny-completed-redelivery"} {
 		for _, stage := range []string{"execute", "verify", "publish"} {
 			want[prefix+" / "+stage] = "skipped"
@@ -464,12 +464,15 @@ func initialFaultJobs(j suiteJobs) bool {
 }
 
 func recoveryJobs(j suiteJobs) bool {
-	if j.TotalCount != 4 {
+	if j.TotalCount != 7 || len(j.Jobs) != 7 {
 		return false
 	}
-	want := map[string]bool{"recover / execute": true, "recover / verify": true, "recover / publish": true, "recover / assert-denied": true}
+	want := map[string]bool{"candidate": true, "deny-non-ready": true, "deny-completed-redelivery": true, "recover / execute": true, "recover / verify": true, "recover / publish": true, "recover / assert-denied": true}
 	for _, job := range j.Jobs {
-		if !want[job.Name] || job.RunAttempt != 1 {
+		if !want[job.Name] || job.RunAttempt != 1 || job.Status != "completed" {
+			return false
+		}
+		if (job.Name == "candidate" || job.Name == "deny-non-ready" || job.Name == "deny-completed-redelivery") && job.Conclusion != "skipped" {
 			return false
 		}
 		delete(want, job.Name)
