@@ -21,6 +21,27 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestCandidateCommandPinRejectsWorkflowDrift(t *testing.T) {
+	const content = "name: reviewed candidate workflow\n"
+	sha := strings.Repeat("a", 40)
+	c := client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/repos/kevinmartin/sofa/contents/.github/workflows/e2e-fake.yml" || r.URL.Query().Get("ref") != sha {
+			return nil, fmt.Errorf("unexpected candidate workflow request %s", r.URL.String())
+		}
+		data, _ := json.Marshal(gitContent{Content: base64.StdEncoding.EncodeToString([]byte(content)), Encoding: "base64"})
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+	})}}
+	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content))); err != nil {
+		t.Fatal("reviewed command source rejected", err)
+	}
+	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content+"changed"))); err == nil {
+		t.Fatal("candidate command drift accepted")
+	}
+	if err := c.verifyCandidateCommands(context.Background(), "main", hash([]byte(content))); err == nil {
+		t.Fatal("mutable candidate workflow ref accepted")
+	}
+}
+
 func testPull() pull {
 	var p pull
 	p.Number = 2
