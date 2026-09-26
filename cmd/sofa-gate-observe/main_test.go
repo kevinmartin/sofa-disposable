@@ -225,14 +225,51 @@ func expectedJobs() jobList {
 	}
 	j := jobList{TotalCount: len(want)}
 	for _, item := range want {
-		j.Jobs = append(j.Jobs, struct {
-			Name       string `json:"name"`
-			Conclusion string `json:"conclusion"`
-			Status     string `json:"status"`
-			RunAttempt int    `json:"run_attempt"`
-		}{item.name, item.conclusion, "completed", 1})
+		j.Jobs = append(j.Jobs, hostedJob{Name: item.name, Conclusion: item.conclusion, Status: "completed", RunAttempt: 1})
 	}
 	return j
+}
+
+func TestScenarioEvidenceRequiresTimedExactJobs(t *testing.T) {
+	start := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	fault := expectedJobs()
+	for i := range fault.Jobs {
+		fault.Jobs[i].StartedAt = start
+		fault.Jobs[i].CompletedAt = start.Add(12 * time.Second)
+		if fault.Jobs[i].Name == "candidate / publish" {
+			fault.Jobs[i].Conclusion = "failure"
+		}
+	}
+	recovery := jobList{TotalCount: 4, Jobs: []hostedJob{
+		{Name: "recover / execute", Status: "completed", Conclusion: "skipped", RunAttempt: 1},
+		{Name: "recover / verify", Status: "completed", Conclusion: "success", RunAttempt: 1},
+		{Name: "recover / publish", Status: "completed", Conclusion: "success", RunAttempt: 1, StartedAt: start, CompletedAt: start.Add(9 * time.Second)},
+		{Name: "recover / assert-denied", Status: "completed", Conclusion: "skipped", RunAttempt: 1},
+	}}
+	serve := func(fault, recovery jobList) client {
+		return client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var payload jobList
+			switch r.URL.Path {
+			case "/repos/kevinmartin/sofa-disposable/actions/runs/41/jobs":
+				payload = fault
+			case "/repos/kevinmartin/sofa-disposable/actions/runs/42/jobs":
+				payload = recovery
+			default:
+				return nil, fmt.Errorf("unexpected jobs path %s", r.URL.Path)
+			}
+			data, _ := json.Marshal(payload)
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+		})}}
+	}
+	producer, recovered := workflowRun{ID: 41}, workflowRun{ID: 42}
+	evidence, err := serve(fault, recovery).scenarioEvidence(context.Background(), producer, recovered)
+	if err != nil || len(evidence) != 5 || evidence[0].JobDurationMS != 12000 || evidence[4].JobDurationMS != 9000 || evidence[0].FakePromptRequests != 1 || evidence[4].RunID != 42 {
+		t.Fatalf("exact scenario timings unavailable: %+v, %v", evidence, err)
+	}
+	fault.Jobs[0].CompletedAt = fault.Jobs[0].StartedAt
+	if _, err := serve(fault, recovery).scenarioEvidence(context.Background(), producer, recovered); err == nil {
+		t.Fatal("untimed hosted scenario accepted")
+	}
 }
 
 func TestValidJobsRequiresEditAndBothDenials(t *testing.T) {

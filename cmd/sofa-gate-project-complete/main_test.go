@@ -28,7 +28,7 @@ func (g *fakeGate) Complete(_ context.Context, _ fixturelifecycle.Suite) (fixtur
 }
 
 func TestProjectCompletionRequiresExactOwnedResource(t *testing.T) {
-	r := observed{SchemaVersion: 4, SofaPR: 2, CandidateSHA: strings.Repeat("a", 40), PRBaseSHA: strings.Repeat("b", 40), DisposableBaseSHA: strings.Repeat("c", 40)}
+	r := observed{SchemaVersion: 5, SofaPR: 2, CandidateSHA: strings.Repeat("a", 40), PRBaseSHA: strings.Repeat("b", 40), DisposableBaseSHA: strings.Repeat("c", 40)}
 	digest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
 	r.SuiteID = fmt.Sprintf("p%d-%x", r.SofaPR, digest[:12])
 	data, err := json.Marshal(r)
@@ -50,7 +50,7 @@ func TestProjectCompletionRequiresExactOwnedResource(t *testing.T) {
 		t.Fatalf("completed report lost exact identity: %s", out)
 	}
 	for _, invalid := range [][]byte{
-		[]byte(`{"schema_version":4,"sofa_pr":2,"candidate_sha":"` + r.CandidateSHA + `","pr_base_sha":"` + r.PRBaseSHA + `","disposable_base_sha":"` + r.DisposableBaseSHA + `","suite_id":"p2-ffffffffffffffffffffffff"}`),
+		[]byte(`{"schema_version":5,"sofa_pr":2,"candidate_sha":"` + r.CandidateSHA + `","pr_base_sha":"` + r.PRBaseSHA + `","disposable_base_sha":"` + r.DisposableBaseSHA + `","suite_id":"p2-ffffffffffffffffffffffff"}`),
 		[]byte(strings.TrimSuffix(string(data), "}") + `,"test_item_state":"closed_archived"}`),
 	} {
 		gate.verified, gate.completed = 0, 0

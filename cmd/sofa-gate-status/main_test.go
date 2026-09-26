@@ -22,7 +22,7 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 	}
 	started := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	r := observed{
-		SchemaVersion: 4, SofaPR: 2, CandidateSHA: strings.Repeat("a", 40), PRBaseSHA: strings.Repeat("b", 40), DisposableBaseSHA: strings.Repeat("c", 40), CandidateDigest: strings.Repeat("e", 64),
+		SchemaVersion: 5, SofaPR: 2, CandidateSHA: strings.Repeat("a", 40), PRBaseSHA: strings.Repeat("b", 40), DisposableBaseSHA: strings.Repeat("c", 40), CandidateDigest: strings.Repeat("e", 64),
 		ProducerRunID: 41, ProducerRunURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/41", ProducerDurationMS: 90000,
 		RetainedArtifactID: 75, ConflictArtifactID: 76, ConflictArtifactURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/41/artifacts/76", ConflictBranchHead: strings.Repeat("b", 40),
 		TestIssue: 62, TestIssueURL: "https://github.com/kevinmartin/sofa-disposable/issues/62", ProjectItem: "PVTI_62", TestItemState: "closed_archived",
@@ -35,6 +35,13 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 	suiteDigest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
 	r.SuiteID = fmt.Sprintf("p%d-%x", r.SofaPR, suiteDigest[:12])
 	r.DraftHeadRef = "sofa-e2e-result/" + r.SuiteID
+	r.Scenarios = []scenarioEvidence{
+		{ID: "edit-fault", RunID: 41, Job: "candidate / execute", Command: "/toolkit/sofa execute", JobDurationMS: 12000, FakePromptRequests: 1},
+		{ID: "branch-conflict", RunID: 41, Job: "candidate / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublicationConflict$' ./cmd/sofa", JobDurationMS: 12000},
+		{ID: "non-ready", RunID: 41, Job: "deny-non-ready / assert-denied", Command: "bin/e2e-fixture deny", JobDurationMS: 12000},
+		{ID: "completed-redelivery", RunID: 41, Job: "deny-completed-redelivery / assert-denied", Command: "bin/e2e-fixture deny", JobDurationMS: 12000},
+		{ID: "recovery-publication", RunID: 42, Job: "recover / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublication$' ./cmd/sofa", JobDurationMS: 12000},
+	}
 	for i, kind := range []string{"non-ready", "completed-redelivery"} {
 		digest := sha256.Sum256([]byte(r.SuiteID + ":denied:" + kind))
 		decision := map[string]string{"non-ready": "admission-denied", "completed-redelivery": "already-completed"}[kind]
@@ -91,6 +98,9 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 		{"wrong run URL", func(r *observed) { r.CandidateRunURL += "/other" }},
 		{"wrong draft branch", func(r *observed) { r.DraftHeadRef = "other" }},
 		{"missing denial", func(r *observed) { r.Denials = r.Denials[:1] }},
+		{"missing scenario", func(r *observed) { r.Scenarios = r.Scenarios[:4] }},
+		{"wrong scenario command", func(r *observed) { r.Scenarios[0].Command = "untrusted" }},
+		{"missing job duration", func(r *observed) { r.Scenarios[1].JobDurationMS = 0 }},
 		{"wrong denial decision", func(r *observed) { r.Denials[0].Decision = "allowed" }},
 		{"duplicate denial artifact", func(r *observed) {
 			r.Denials[1].ArtifactID = r.Denials[0].ArtifactID
@@ -102,6 +112,7 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mutated := r
 			mutated.Denials = append(mutated.Denials[:0:0], r.Denials...)
+			mutated.Scenarios = append(mutated.Scenarios[:0:0], r.Scenarios...)
 			tc.edit(&mutated)
 			input, err := json.Marshal(mutated)
 			if err != nil {
