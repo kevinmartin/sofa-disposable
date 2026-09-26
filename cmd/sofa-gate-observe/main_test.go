@@ -52,6 +52,23 @@ func testPull() pull {
 	return p
 }
 
+func TestClosedFixtureDraftCannotRecreateResultRef(t *testing.T) {
+	p := testPull()
+	mainSHA := strings.Repeat("c", 40)
+	requests := 0
+	c := client{token: "read", publisherToken: "write", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/"+consumerRepo+"/pulls" || r.URL.Query().Get("state") != "all" {
+			return nil, fmt.Errorf("unexpected request after closed fixture draft: %s %s", r.Method, r.URL.String())
+		}
+		data := []byte(`[{"number":39,"state":"closed"}]`)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+	})}}
+	if _, err := c.publish(context.Background(), p, mainSHA, validated{}); err == nil || requests != 1 {
+		t.Fatalf("closed draft permitted a result-ref write: requests=%d err=%v", requests, err)
+	}
+}
+
 func testArtifacts(t *testing.T) (map[string][]byte, pull, workflowRun, string, []byte) {
 	t.Helper()
 	p := testPull()

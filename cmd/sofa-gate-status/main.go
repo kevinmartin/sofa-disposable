@@ -64,6 +64,9 @@ type observed struct {
 	DraftBaseRef       string             `json:"draft_base_ref"`
 	DraftState         string             `json:"draft_state"`
 	DraftIsDraft       bool               `json:"draft_is_draft"`
+	CallerHeadSHA      string             `json:"caller_head_sha"`
+	CallerRefState     string             `json:"caller_ref_state"`
+	ResultRefState     string             `json:"result_ref_state"`
 	OwnedResourceState string             `json:"owned_resource_cleanup_state"`
 }
 
@@ -106,7 +109,7 @@ func validObserved(r observed) bool {
 		r.ConflictArtifactURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d/artifacts/%d", r.ProducerRunID, r.ConflictArtifactID) ||
 		r.TestIssueURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/issues/%d", r.TestIssue) ||
 		r.DraftPRURL != fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/pull/%d", r.DraftPR) ||
-		r.DraftHeadRef != "sofa-e2e-result/"+r.SuiteID || r.DraftBaseRef != "main" || r.DraftState != "open" || !r.DraftIsDraft || r.OwnedResourceState != "retained_for_replay" {
+		r.DraftHeadRef != "sofa-e2e-result/"+r.SuiteID || r.DraftBaseRef != "main" || r.DraftState != "closed" || !r.DraftIsDraft || !sha40.MatchString(r.CallerHeadSHA) || r.CallerRefState != "absent" || r.ResultRefState != "absent" || r.OwnedResourceState != "cleaned" {
 		return false
 	}
 	if r.CandidateRunStartedAt.IsZero() || r.CandidateRunUpdatedAt.IsZero() || !r.CandidateRunUpdatedAt.After(r.CandidateRunStartedAt) {

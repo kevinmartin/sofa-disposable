@@ -136,7 +136,7 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 		t.Fatal(err)
 	}
 	text := string(data)
-	names := []string{"coordinate", "observe", "complete-project", "status"}
+	names := []string{"coordinate", "observe", "complete-project", "cleanup-owned", "status"}
 	jobs := make(map[string]string, len(names))
 	for i, name := range names {
 		start := strings.Index(text, "\n  "+name+":\n")
@@ -152,7 +152,7 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 		}
 		jobs[name] = text[start:end]
 	}
-	if !strings.Contains(jobs["observe"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["complete-project"], "SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}") || !strings.Contains(jobs["status"], "SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}") {
+	if !strings.Contains(jobs["observe"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["complete-project"], "SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}") || !strings.Contains(jobs["cleanup-owned"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["status"], "SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}") {
 		t.Fatal("trusted credential owner job missing")
 	}
 	for _, tc := range []struct {
@@ -161,6 +161,7 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 	}{
 		{"observe", []string{"SOFA_PROJECTS_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY", "issues: write"}},
 		{"complete-project", []string{"SOFA_PUBLISH_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY"}},
+		{"cleanup-owned", []string{"SOFA_PROJECTS_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY", "issues: write"}},
 		{"status", []string{"SOFA_PUBLISH_TOKEN", "SOFA_PROJECTS_TOKEN", "issues: write"}},
 	} {
 		for _, secret := range tc.forbidden {
@@ -169,8 +170,17 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 			}
 		}
 	}
-	if !strings.Contains(jobs["complete-project"], "needs: observe") || !strings.Contains(jobs["status"], "needs: complete-project") || !strings.Contains(jobs["status"], "SOFA_GATE_RESULT_PATH: gate-results-complete.jsonl") {
-		t.Fatal("Project cleanup no longer precedes App success")
+	if !strings.Contains(jobs["complete-project"], "needs: observe") || !strings.Contains(jobs["cleanup-owned"], "needs: complete-project") || !strings.Contains(jobs["status"], "needs: cleanup-owned") || !strings.Contains(jobs["status"], "SOFA_GATE_RESULT_PATH: gate-results-cleaned.jsonl") {
+		t.Fatal("owned resource cleanup no longer precedes App success")
+	}
+	for _, artifact := range []string{"observed", "complete", "cleaned"} {
+		name := "sofa-e2e-" + artifact + "-${{ github.run_id }}"
+		if strings.Count(text, name) != 2 || strings.Contains(text, name+"-${{ github.run_attempt }}") {
+			t.Fatalf("trusted %s artifact is not stable across failed-job retries", artifact)
+		}
+	}
+	if strings.Count(text, "overwrite: true") != 3 {
+		t.Fatal("trusted artifact rerun overwrite is not explicit")
 	}
 }
 

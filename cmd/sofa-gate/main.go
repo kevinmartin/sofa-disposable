@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/kevinmartin/sofa-disposable/internal/fixturelifecycle"
+	"github.com/kevinmartin/sofa-disposable/internal/gatecaller"
 	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
 
@@ -34,6 +35,7 @@ var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var errRetryBudget = errors.New("hosted suite retry budget exhausted")
 var errNotReady = errors.New("sofa candidate test workflow unavailable")
 var errSuiteCompleted = errors.New("hosted suite already completed")
+var errSuiteItemCompleted = errors.New("hosted suite Project item already completed")
 
 type fixtureGate interface {
 	EnsureReady(context.Context, fixturelifecycle.Suite) (fixturelifecycle.Resource, error)
@@ -251,82 +253,7 @@ func denialSuiteID(p pull, consumerBase, kind string) string {
 }
 
 func branchWorkflow(p pull, consumerBase string) string {
-	// GitHub requires a literal reusable-workflow ref. This entire caller is
-	// generated from verified fixed metadata; no issue/PR prose enters YAML.
-	return fmt.Sprintf(`name: sofa hosted E2E candidate
-on:
-  workflow_dispatch:
-    inputs:
-      sofa_pr: {type: string, required: false}
-      candidate_sha: {type: string, required: false}
-      base_sha: {type: string, required: false}
-      source_run_id: {type: string, required: false}
-      source_run_attempt: {type: string, required: false}
-      mode: {type: string, required: false}
-      producer_run_id: {type: string, required: false}
-permissions: {}
-jobs:
-  candidate:
-    if: inputs.mode == 'initial'
-    permissions:
-      contents: read
-      actions: read
-    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
-    with:
-      suite_id: %s
-      scenario: edit
-      candidate_sha: %s
-      base_sha: %s
-      disposable_base_sha: %s
-      reconcile_candidate: false
-      publish_fault: before-publication
-  deny-non-ready:
-    if: inputs.mode == 'initial'
-    permissions:
-      contents: read
-      actions: read
-    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
-    with:
-      suite_id: %s
-      scenario: denied
-      denial_kind: non-ready
-      candidate_sha: %s
-      base_sha: %s
-      disposable_base_sha: %s
-      reconcile_candidate: false
-  deny-completed-redelivery:
-    if: inputs.mode == 'initial'
-    permissions:
-      contents: read
-      actions: read
-    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
-    with:
-      suite_id: %s
-      scenario: denied
-      denial_kind: completed-redelivery
-      candidate_sha: %s
-      base_sha: %s
-      disposable_base_sha: %s
-      reconcile_candidate: false
-  recover:
-    if: inputs.mode == 'recovery' && inputs.producer_run_id != ''
-    permissions:
-      contents: read
-      actions: read
-    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
-    with:
-      suite_id: %s
-      scenario: edit
-      candidate_sha: %s
-      base_sha: %s
-      disposable_base_sha: %s
-      reconcile_candidate: true
-      producer_run_id: ${{ inputs.producer_run_id }}
-      producer_run_attempt: '1'
-`, p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase,
-		p.Head.SHA, denialSuiteID(p, consumerBase, "non-ready"), p.Head.SHA, p.Base.SHA, consumerBase,
-		p.Head.SHA, denialSuiteID(p, consumerBase, "completed-redelivery"), p.Head.SHA, p.Base.SHA, consumerBase,
-		p.Head.SHA, suiteID(p, consumerBase), p.Head.SHA, p.Base.SHA, consumerBase)
+	return gatecaller.BranchWorkflow(gatecaller.Pull{Number: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA}, consumerBase)
 }
 
 func (a api) checkCandidate(ctx context.Context, p pull) (bool, error) {
@@ -722,10 +649,27 @@ func run(ctx context.Context, a api) error {
 			if !ready {
 				return errNotReady
 			}
+			// Successful cleanup removes the caller ref. Check the exact owned
+			// Project item before branch authoring so a later scan cannot recreate
+			// that ref while a status retry is still pending.
+			mainRef, ok, err := a.branch(ctx, "main")
+			if err != nil || !ok || suiteID(p, mainRef.Object.SHA) != suite {
+				return errors.New("disposable base changed before Project replay check")
+			}
+			if a.fixture != nil || a.projectToken != "" {
+				fixture := fixturelifecycle.Suite{ID: suite, CandidateSHA: p.Head.SHA, PRBaseSHA: p.Base.SHA, DisposableBaseSHA: mainRef.Object.SHA}
+				if resource, err := a.fixtureWriter().Verify(ctx, fixture); err == nil && resource.Closed && resource.Archived && resource.IssueNumber > 0 && resource.ProjectItem != "" {
+					return errSuiteItemCompleted
+				}
+			}
 			return nil
 		})
 		if errors.Is(err, errSuiteCompleted) {
 			fmt.Printf("PR %d exact hosted suite already completed\n", p.Number)
+			continue
+		}
+		if errors.Is(err, errSuiteItemCompleted) {
+			fmt.Printf("PR %d exact suite resources completed; awaiting App status or status retry\n", p.Number)
 			continue
 		}
 		if errors.Is(err, errNotReady) {
