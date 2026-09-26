@@ -27,11 +27,39 @@ type fakeGateStatus struct {
 	dispatchToken string
 }
 
-type fakeFixtureGate struct{ seen []fixturelifecycle.Suite }
+type fakeFixtureGate struct {
+	seen   []fixturelifecycle.Suite
+	closed bool
+}
 
 func (f *fakeFixtureGate) EnsureReady(_ context.Context, suite fixturelifecycle.Suite) (fixturelifecycle.Resource, error) {
 	f.seen = append(f.seen, suite)
+	if f.closed {
+		return fixturelifecycle.Resource{}, errors.New("test item already completed")
+	}
 	return fixturelifecycle.Resource{IssueNumber: 1, IssueURL: "https://github.com/kevinmartin/sofa-disposable/issues/1", ProjectItem: "test-item"}, nil
+}
+
+func (f *fakeFixtureGate) Verify(_ context.Context, suite fixturelifecycle.Suite) (fixturelifecycle.Resource, error) {
+	f.seen = append(f.seen, suite)
+	if f.closed {
+		return fixturelifecycle.Resource{IssueNumber: 1, IssueURL: "https://github.com/kevinmartin/sofa-disposable/issues/1", ProjectItem: "test-item", Closed: true, Archived: true}, nil
+	}
+	return fixturelifecycle.Resource{}, errors.New("test item is not complete")
+}
+
+func TestCompletedSuiteItemCannotDispatchButAllowsObserverReplay(t *testing.T) {
+	suite := fixturelifecycle.Suite{ID: "p2-" + strings.Repeat("a", 24), CandidateSHA: strings.Repeat("b", 40), PRBaseSHA: strings.Repeat("c", 40), DisposableBaseSHA: strings.Repeat("d", 40)}
+	gate := &fakeFixtureGate{closed: true}
+	ready, err := readyOrCompleted(context.Background(), gate, suite)
+	if err != nil || ready || len(gate.seen) != 2 || gate.seen[0] != suite || gate.seen[1] != suite {
+		t.Fatalf("completed suite was dispatched or could not be replayed: ready=%t err=%v calls=%d", ready, err, len(gate.seen))
+	}
+	gate.closed = false
+	ready, err = readyOrCompleted(context.Background(), gate, suite)
+	if err != nil || !ready {
+		t.Fatalf("fresh Ready test item could not dispatch: ready=%t err=%v", ready, err)
+	}
 }
 
 func (f *fakeGateStatus) DispatchToken(context.Context) (string, error) {
