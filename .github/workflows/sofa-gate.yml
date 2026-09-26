@@ -126,9 +126,10 @@ jobs:
       - name: Carry trusted validated gate results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sofa-e2e-observed-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sofa-e2e-observed-${{ github.run_id }}
           path: gate-results.jsonl
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
 
   complete-project:
@@ -154,7 +155,7 @@ jobs:
       - name: Download exact trusted observer report
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: sofa-e2e-observed-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sofa-e2e-observed-${{ github.run_id }}
       - name: Complete exact suite-owned issue and Project item
         env:
           GH_TOKEN: ${{ github.token }}
@@ -163,14 +164,53 @@ jobs:
       - name: Carry trusted completed Project result
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sofa-e2e-complete-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sofa-e2e-complete-${{ github.run_id }}
           path: gate-results-complete.jsonl
           if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  cleanup-owned:
+    needs: complete-project
+    if: needs.complete-project.result == 'success' && github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main'
+    environment: sofa-gate-coordinator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted cleanup code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download exact completed Project result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sofa-e2e-complete-${{ github.run_id }}
+      - name: Retire only verified suite-owned draft and refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}
+        run: go run ./cmd/sofa-gate-cleanup --success-report gate-results-complete.jsonl
+      - name: Carry exact cleanup receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sofa-e2e-cleaned-${{ github.run_id }}
+          path: gate-results-cleaned.jsonl
+          if-no-files-found: error
+          overwrite: true
           retention-days: 7
 
   status:
-    needs: complete-project
-    if: needs.complete-project.result == 'success' && github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main'
+    needs: cleanup-owned
+    if: needs.cleanup-owned.result == 'success' && github.repository == 'kevinmartin/sofa-disposable' && github.ref == 'refs/heads/main'
     environment: sofa-gate-coordinator
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -187,13 +227,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Download exact completed Project result
+      - name: Download exact cleaned result
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: sofa-e2e-complete-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sofa-e2e-cleaned-${{ github.run_id }}
       - name: Publish App-sourced sofa status for completed results
         env:
           SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
           SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
-          SOFA_GATE_RESULT_PATH: gate-results-complete.jsonl
+          SOFA_GATE_RESULT_PATH: gate-results-cleaned.jsonl
         run: go run ./cmd/sofa-gate-status

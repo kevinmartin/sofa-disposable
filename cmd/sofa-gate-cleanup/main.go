@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/kevinmartin/sofa-disposable/internal/gatecaller"
 )
 
 const (
@@ -40,6 +42,7 @@ type options struct {
 	CallerSHA, ResultSHA, CandidateDigest      string
 	DraftPR                                    int
 	Apply                                      bool
+	AllowActive                                bool // only set by the trusted completed-result path
 }
 
 func parse(args []string) (options, error) {
@@ -69,30 +72,7 @@ func (o options) caller() string { return "sofa-e2e/" + o.suite() }
 func (o options) result() string { return "sofa-e2e-result/" + o.suite() }
 
 func (o options) callerContent() string {
-	return fmt.Sprintf(`name: sofa hosted E2E candidate
-on:
-  workflow_dispatch:
-    inputs:
-      sofa_pr: {type: string, required: false}
-      candidate_sha: {type: string, required: false}
-      base_sha: {type: string, required: false}
-      source_run_id: {type: string, required: false}
-      source_run_attempt: {type: string, required: false}
-permissions: {}
-jobs:
-  candidate:
-    permissions:
-      contents: read
-      actions: read
-    uses: kevinmartin/sofa/.github/workflows/e2e-fake.yml@%s
-    with:
-      suite_id: %s
-      scenario: edit
-      candidate_sha: %s
-      base_sha: %s
-      disposable_base_sha: %s
-      reconcile_candidate: false
-`, o.CandidateSHA, o.suite(), o.CandidateSHA, o.PRBaseSHA, o.DisposableBaseSHA)
+	return gatecaller.BranchWorkflow(gatecaller.Pull{Number: o.SofaPR, HeadSHA: o.CandidateSHA, BaseSHA: o.PRBaseSHA}, o.DisposableBaseSHA)
 }
 
 type api struct {
@@ -315,7 +295,7 @@ func (a api) verify(ctx context.Context, o options) (bool, bool, error) {
 	if err != nil {
 		return false, false, err
 	}
-	if current.State == "open" && current.Head.SHA == o.CandidateSHA && current.Base.SHA == o.PRBaseSHA && mainSHA == o.DisposableBaseSHA {
+	if !o.AllowActive && current.State == "open" && current.Head.SHA == o.CandidateSHA && current.Base.SHA == o.PRBaseSHA && mainSHA == o.DisposableBaseSHA {
 		return false, false, errors.New("current active sofa suite cannot be cleaned")
 	}
 	pr, err := a.pull(ctx, consumerRepo, o.DraftPR)
@@ -396,7 +376,7 @@ func ownedDraft(o options, pr pull, resultExists bool) bool {
 		pr.Body == wantBody &&
 		pr.HTMLURL == fmt.Sprintf("https://github.com/%s/pull/%d", consumerRepo, o.DraftPR) &&
 		pr.Head.Ref == o.result() &&
-		(!resultExists || pr.Head.SHA == o.ResultSHA && pr.Head.Repo.FullName == consumerRepo) &&
+		pr.Head.SHA == o.ResultSHA && pr.Head.Repo.FullName == consumerRepo &&
 		pr.Base.Ref == "main" && pr.Base.Repo.FullName == consumerRepo
 }
 
@@ -493,6 +473,17 @@ func leaseDelete(ctx context.Context, remote, token, branch, sha string) error {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--success-report" {
+		httpClient := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("GitHub redirect refused") }}
+		a := api{client: httpClient, token: os.Getenv("GH_TOKEN"), writeToken: os.Getenv("SOFA_PUBLISH_TOKEN"), base: "https://api.github.com"}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := runSuccess(ctx, a, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, "sofa-gate-cleanup:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	o, err := parse(os.Args[1:])
 	if err == nil && (os.Getenv("GITHUB_REPOSITORY") != consumerRepo || os.Getenv("GITHUB_REF") != "refs/heads/main" || os.Getenv("GH_TOKEN") == "" || (o.Apply && os.Getenv("SOFA_PUBLISH_TOKEN") == "")) {
 		err = errors.New("trusted disposable default-branch identity or credential unavailable")

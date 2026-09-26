@@ -1143,6 +1143,13 @@ func marker(suite string, v validated) string {
 func (c client) publish(ctx context.Context, p pull, mainSHA string, v validated) (draftPR, error) {
 	suite := suiteID(p, mainSHA)
 	branch := "sofa-e2e-result/" + suite
+	// A closed draft is terminal. Never recreate its result ref, and never
+	// treat a human-closed draft as a successful cleanup receipt.
+	if found, err := c.closedDraft(ctx, p, mainSHA); err != nil {
+		return draftPR{}, err
+	} else if found {
+		return draftPR{}, errors.New("suite draft is closed; retry trusted cleanup or status job")
+	}
 	branchSHA, exists, err := c.ref(ctx, branch)
 	if err != nil {
 		return draftPR{}, err
@@ -1217,6 +1224,23 @@ func (c client) publish(ctx context.Context, p pull, mainSHA string, v validated
 	return created, nil
 }
 
+func (c client) closedDraft(ctx context.Context, p pull, mainSHA string) (bool, error) {
+	suite := suiteID(p, mainSHA)
+	branch := "sofa-e2e-result/" + suite
+	var prs []draftPR
+	path := "/repos/" + consumerRepo + "/pulls?state=all&head=" + url.QueryEscape("kevinmartin:"+branch) + "&base=main&per_page=100"
+	if err := c.get(ctx, path, &prs); err != nil {
+		return false, err
+	}
+	if len(prs) > 1 {
+		return false, errors.New("multiple fixture PRs for one suite")
+	}
+	if len(prs) == 0 || prs[0].State == "open" {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (c client) observe(ctx context.Context, p pull) error {
 	mainSHA, ok, err := c.ref(ctx, "main")
 	if err != nil || !ok {
@@ -1229,7 +1253,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 		return err
 	}
 	if !ok {
-		return nil // Coordinator has not dispatched this exact suite.
+		return nil // A failed App write retries from its same-run cleaned artifact.
 	}
 	caller, err := c.content(ctx, workflowPath, branchSHA)
 	if err != nil || string(caller) != expectedCaller(p, mainSHA) {

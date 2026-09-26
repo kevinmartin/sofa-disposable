@@ -30,7 +30,7 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 		CandidateRunStartedAt: started, CandidateRunUpdatedAt: started.Add(90 * time.Second), CandidateDurationMS: 90000,
 		ReportArtifactID: 77, ReportArtifactURL: "https://github.com/kevinmartin/sofa-disposable/actions/runs/42/artifacts/77",
 		DraftPR: 7, DraftPRURL: "https://github.com/kevinmartin/sofa-disposable/pull/7", DraftHeadSHA: strings.Repeat("f", 40),
-		DraftBaseRef: "main", DraftState: "open", DraftIsDraft: true, OwnedResourceState: "retained_for_replay",
+		DraftBaseRef: "main", DraftState: "closed", DraftIsDraft: true, CallerHeadSHA: strings.Repeat("d", 40), CallerRefState: "absent", ResultRefState: "absent", OwnedResourceState: "cleaned",
 	}
 	suiteDigest := sha256.Sum256([]byte(r.CandidateSHA + ":" + r.PRBaseSHA + ":" + r.DisposableBaseSHA))
 	r.SuiteID = fmt.Sprintf("p%d-%x", r.SofaPR, suiteDigest[:12])
@@ -106,8 +106,10 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 			r.Denials[1].ArtifactID = r.Denials[0].ArtifactID
 			r.Denials[1].ArtifactURL = r.Denials[0].ArtifactURL
 		}},
-		{"cleanup falsely claimed", func(r *observed) { r.OwnedResourceState = "cleaned" }},
-		{"draft no longer open", func(r *observed) { r.DraftState = "closed" }},
+		{"cleanup missing", func(r *observed) { r.OwnedResourceState = "retained_for_replay" }},
+		{"caller ref not absent", func(r *observed) { r.CallerRefState = "present" }},
+		{"result ref not absent", func(r *observed) { r.ResultRefState = "present" }},
+		{"draft still open", func(r *observed) { r.DraftState = "open" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mutated := r

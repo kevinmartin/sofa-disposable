@@ -62,6 +62,37 @@ func TestCompletedSuiteItemCannotDispatchButAllowsObserverReplay(t *testing.T) {
 	}
 }
 
+func TestCompletedSuiteCannotRecreateRetiredCallerRef(t *testing.T) {
+	t.Setenv("SOFA_GATE_PR", "2")
+	t.Setenv("SOFA_GATE_HEAD", "")
+	t.Setenv("SOFA_GATE_BASE", "")
+	p := testPull(strings.Repeat("a", 40), strings.Repeat("b", 40))
+	base := strings.Repeat("c", 40)
+	suite := suiteID(p, base)
+	gate := &fakeFixtureGate{closed: true}
+	status := &fakeGateStatus{latest: gatestatus.Snapshot{Found: true, Source: true, State: gatestatus.Pending, Description: suiteDescription(suite, gatestatus.Pending)}}
+	a := api{token: "read", fixture: gate, status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("completed suite caused a write: %s %s", r.Method, r.URL.Path)
+		}
+		switch {
+		case r.URL.Path == "/repos/"+sofaRepo+"/pulls/2":
+			body, _ := json.Marshal(p)
+			return testResponse(200, string(body)), nil
+		case r.URL.Path == "/repos/"+disposableRepo+"/git/ref/heads/main":
+			return testResponse(200, `{"object":{"sha":"`+base+`"}}`), nil
+		case strings.Contains(r.URL.Path, "/contents/"+candidatePath):
+			return testResponse(200, `{}`), nil
+		default:
+			t.Fatalf("completed suite queried a retired ref: %s", r.URL.Path)
+			return nil, nil
+		}
+	})}}
+	if err := run(context.Background(), a); err != nil || len(gate.seen) != 1 || len(status.published) != 0 {
+		t.Fatalf("completed suite replay was not inert: err=%v, Project reads=%d, statuses=%+v", err, len(gate.seen), status.published)
+	}
+}
+
 func (f *fakeGateStatus) DispatchToken(context.Context) (string, error) {
 	if f.dispatchToken == "" {
 		return "", errors.New("App dispatch token unavailable")
