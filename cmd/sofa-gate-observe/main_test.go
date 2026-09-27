@@ -34,6 +34,9 @@ func TestCandidateCommandPinRejectsWorkflowDrift(t *testing.T) {
 	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content))); err != nil {
 		t.Fatal("reviewed command source rejected", err)
 	}
+	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content+"old")), hash([]byte(content))); err != nil {
+		t.Fatal("second reviewed command source rejected", err)
+	}
 	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content+"changed"))); err == nil {
 		t.Fatal("candidate command drift accepted")
 	}
