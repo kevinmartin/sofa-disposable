@@ -87,8 +87,8 @@ func validScenarios(r observed) bool {
 	want := []scenarioEvidence{
 		{ID: "edit-fault", RunID: r.ProducerRunID, Job: "candidate / execute", Command: "/toolkit/sofa execute", FakePromptRequests: 1},
 		{ID: "branch-conflict", RunID: r.ProducerRunID, Job: "candidate / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublicationConflict$' ./cmd/sofa"},
-		{ID: "non-ready", RunID: r.ProducerRunID, Job: "deny-non-ready / assert-denied", Command: "bin/e2e-fixture deny"},
-		{ID: "completed-redelivery", RunID: r.ProducerRunID, Job: "deny-completed-redelivery / assert-denied", Command: "bin/e2e-fixture deny"},
+		{ID: "non-ready", RunID: r.ProducerRunID, Job: "deny-non-ready / assert-denied", Command: "bin/sofa-test deny"},
+		{ID: "completed-redelivery", RunID: r.ProducerRunID, Job: "deny-completed-redelivery / assert-denied", Command: "bin/sofa-test deny"},
 		{ID: "recovery-publication", RunID: r.CandidateRunID, Job: "recover / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublication$' ./cmd/sofa"},
 	}
 	for i, got := range r.Scenarios {

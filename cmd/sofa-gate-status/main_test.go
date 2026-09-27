@@ -38,8 +38,8 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 	r.Scenarios = []scenarioEvidence{
 		{ID: "edit-fault", RunID: 41, Job: "candidate / execute", Command: "/toolkit/sofa execute", JobDurationMS: 12000, FakePromptRequests: 1},
 		{ID: "branch-conflict", RunID: 41, Job: "candidate / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublicationConflict$' ./cmd/sofa", JobDurationMS: 12000},
-		{ID: "non-ready", RunID: 41, Job: "deny-non-ready / assert-denied", Command: "bin/e2e-fixture deny", JobDurationMS: 12000},
-		{ID: "completed-redelivery", RunID: 41, Job: "deny-completed-redelivery / assert-denied", Command: "bin/e2e-fixture deny", JobDurationMS: 12000},
+		{ID: "non-ready", RunID: 41, Job: "deny-non-ready / assert-denied", Command: "bin/sofa-test deny", JobDurationMS: 12000},
+		{ID: "completed-redelivery", RunID: 41, Job: "deny-completed-redelivery / assert-denied", Command: "bin/sofa-test deny", JobDurationMS: 12000},
 		{ID: "recovery-publication", RunID: 42, Job: "recover / publish", Command: "go test -count=1 -run '^TestHostedArtifactPublication$' ./cmd/sofa", JobDurationMS: 12000},
 	}
 	for i, kind := range []string{"non-ready", "completed-redelivery"} {
