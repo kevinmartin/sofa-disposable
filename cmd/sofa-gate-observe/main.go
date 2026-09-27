@@ -29,10 +29,12 @@ const (
 	consumerRepo          = "kevinmartin/sofa-disposable"
 	workflowPath          = ".github/workflows/sofa-gate.yml"
 	candidateWorkflowPath = ".github/workflows/e2e-fake.yml"
-	// These reported commands are valid only for this reviewed candidate workflow.
-	candidateWorkflowHash = "53c9a95c2ecc5a8c7e3cbb98a796105c75923705c3e13178bd904d3f03d8dbaf"
-	fixturePath           = "fixture/greeting.go"
-	maxArtifactZip        = 8 << 20
+	// Keep the original candidate pin valid for in-flight suites while allowing
+	// the reviewed sentinel assignment/export fix in sofa PR #5.
+	candidateWorkflowHash     = "53c9a95c2ecc5a8c7e3cbb98a796105c75923705c3e13178bd904d3f03d8dbaf"
+	candidateWorkflowSafeHash = "56496b0276e6681d8e4a995c6580ad48a43051ee7b1e4563fb791f44c101858a"
+	fixturePath               = "fixture/greeting.go"
+	maxArtifactZip            = 8 << 20
 )
 
 var sha40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -182,7 +184,7 @@ func (c client) content(ctx context.Context, path, ref string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
 }
 
-func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, wantHash string) error {
+func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA string, wantHashes ...string) error {
 	if !sha40.MatchString(candidateSHA) {
 		return errors.New("candidate workflow revision invalid")
 	}
@@ -195,10 +197,16 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, wantH
 		return errors.New("candidate workflow content unavailable")
 	}
 	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
-	if err != nil || hash(content) != wantHash {
+	if err != nil {
 		return errors.New("candidate workflow command pin changed")
 	}
-	return nil
+	digest := hash(content)
+	for _, wantHash := range wantHashes {
+		if digest == wantHash {
+			return nil
+		}
+	}
+	return errors.New("candidate workflow command pin changed")
 }
 
 type workflowRun struct {
@@ -1288,7 +1296,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil {
 		return err
 	}
-	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, candidateWorkflowHash); err != nil {
+	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, candidateWorkflowHash, candidateWorkflowSafeHash); err != nil {
 		return err
 	}
 	files, artifactID, err := c.reportArtifact(ctx, r, suite)
