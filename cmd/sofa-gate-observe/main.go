@@ -30,7 +30,7 @@ const (
 	workflowPath          = ".github/workflows/sofa-gate.yml"
 	candidateWorkflowPath = ".github/workflows/e2e-fake.yml"
 	// These reported commands are valid only for this reviewed candidate workflow.
-	candidateWorkflowHash = "1f42dba8dfccd5d450c1f9596cc740a8682f93ba909a19effe5d0817942eab84"
+	candidateWorkflowHash = "53c9a95c2ecc5a8c7e3cbb98a796105c75923705c3e13178bd904d3f03d8dbaf"
 	fixturePath           = "fixture/greeting.go"
 	maxArtifactZip        = 8 << 20
 )
@@ -280,8 +280,8 @@ func (c client) scenarioEvidence(ctx context.Context, producer, recovered workfl
 	}{
 		{"edit-fault", "candidate / execute", "/toolkit/sofa execute", producer, fault, 1},
 		{"branch-conflict", "candidate / publish", "go test -count=1 -run '^TestHostedArtifactPublicationConflict$' ./cmd/sofa", producer, fault, 0},
-		{"non-ready", "deny-non-ready / assert-denied", "bin/e2e-fixture deny", producer, fault, 0},
-		{"completed-redelivery", "deny-completed-redelivery / assert-denied", "bin/e2e-fixture deny", producer, fault, 0},
+		{"non-ready", "deny-non-ready / assert-denied", "bin/sofa-test deny", producer, fault, 0},
+		{"completed-redelivery", "deny-completed-redelivery / assert-denied", "bin/sofa-test deny", producer, fault, 0},
 		{"recovery-publication", "recover / publish", "go test -count=1 -run '^TestHostedArtifactPublication$' ./cmd/sofa", recovered, recovery, 0},
 	}
 	evidence := make([]scenarioEvidence, 0, len(requested))
