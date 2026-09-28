@@ -1,0 +1,19 @@
+{
+  "name": "sofa-disposable-quality-pilot",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "format:check": "node --eval \"const fs=require('node:fs');if(!fs.readFileSync('src/App.tsx','utf8').endsWith('\\n'))process.exit(1)\"",
+    "lint": "tsc --noEmit --noUnusedLocals",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/quality.test.mjs",
+    "build": "tsc --outDir dist"
+  },
+  "dependencies": {
+    "react": "19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.0.0",
+    "typescript": "5.7.3"
+  }
+}

@@ -1,0 +1,15 @@
+name: Sofa / disposable TypeScript React quality pilot
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    permissions:
+      contents: read
+    uses: kevinmartin/sofa/.github/workflows/quality.reusable.yml@72cf75ea3b9afe4224d784131c4b531afc701300
+    with:
+      profiles: react
