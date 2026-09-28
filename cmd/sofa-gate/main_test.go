@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -337,7 +336,7 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 			dispatched = request.Ref
 			return respond(204, nil)
 		default:
-			t.Fatal(fmt.Sprintf("unexpected GitHub API request %s %s", r.Method, path))
+			t.Fatalf("unexpected GitHub API request %s %s", r.Method, path)
 			return nil, nil
 		}
 	})}}

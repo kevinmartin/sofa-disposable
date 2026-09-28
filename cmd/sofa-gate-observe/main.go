@@ -598,7 +598,7 @@ func unpackZIPExpected(data []byte, want map[string]bool) (map[string][]byte, er
 	out := make(map[string][]byte, len(want))
 	total := uint64(0)
 	for _, f := range zr.File {
-		if !want[f.Name] || f.FileInfo().Mode().IsRegular() == false || f.UncompressedSize64 > 2<<20 || f.CompressedSize64 > maxArtifactZip {
+		if !want[f.Name] || !f.FileInfo().Mode().IsRegular() || f.UncompressedSize64 > 2<<20 || f.CompressedSize64 > maxArtifactZip {
 			return nil, errors.New("unexpected hosted artifact entry")
 		}
 		if _, exists := out[f.Name]; exists {

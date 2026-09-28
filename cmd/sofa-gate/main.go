@@ -229,10 +229,6 @@ func (a api) get(ctx context.Context, path string, output any) error {
 	return a.request(ctx, http.MethodGet, path, a.token, nil, output)
 }
 
-func (a api) post(ctx context.Context, path string, input, output any) error {
-	return a.request(ctx, http.MethodPost, path, a.token, input, output)
-}
-
 func (a api) postWorkflow(ctx context.Context, path string, input, output any) error {
 	if a.workflowToken == "" {
 		return errors.New("disposable workflow-authoring credential unavailable")
