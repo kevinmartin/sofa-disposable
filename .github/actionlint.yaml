@@ -1,0 +1,8 @@
+# GitHub documents this permission, but actionlint 1.7.12 does not recognize it.
+paths:
+  .github/workflows/sofa-acp-preflight.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
+  .github/workflows/sofa.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
