@@ -46,11 +46,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p candidate transport "$RUNNER_TEMP/copilot-package" "$RUNNER_TEMP/sofa-privileged"
-          export SOFA_PROJECTS_TOKEN="$(openssl rand -hex 32)"
-          export SOFA_PUBLISH_TOKEN="$(openssl rand -hex 32)"
-          export SOFA_STATE_TOKEN="$(openssl rand -hex 32)"
-          export SOFA_APP_PRIVATE_KEY="$(openssl rand -hex 32)"
-          export SOFA_MODEL_TOKEN="$(openssl rand -hex 32)"
+          SOFA_PROJECTS_TOKEN="$(openssl rand -hex 32)"
+          SOFA_PUBLISH_TOKEN="$(openssl rand -hex 32)"
+          SOFA_STATE_TOKEN="$(openssl rand -hex 32)"
+          SOFA_APP_PRIVATE_KEY="$(openssl rand -hex 32)"
+          SOFA_MODEL_TOKEN="$(openssl rand -hex 32)"
+          export SOFA_PROJECTS_TOKEN SOFA_PUBLISH_TOKEN SOFA_STATE_TOKEN SOFA_APP_PRIVATE_KEY SOFA_MODEL_TOKEN
           printf '%s' "$SOFA_PROJECTS_TOKEN" > "$RUNNER_TEMP/sofa-privileged/sentinel"
           cat > "$RUNNER_TEMP/sofa-cli/probe.js" <<'JS'
           const fs = require('node:fs');
