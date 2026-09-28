@@ -1,0 +1,17 @@
+# Managed by sofa config; edit the source manifest in kevinmartin/sofa.
+name: Sofa / PR quality
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    permissions:
+      contents: read
+    uses: kevinmartin/sofa/.github/workflows/quality.reusable.yml@v1
+    with:
+      profiles: go
