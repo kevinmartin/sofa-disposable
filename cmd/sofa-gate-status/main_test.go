@@ -10,8 +10,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kevinmartin/sofa-disposable/internal/gatefailure"
 	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
+
+type recordingStatus struct {
+	results []gatestatus.Result
+}
+
+func (r *recordingStatus) Latest(_ context.Context, head string) (gatestatus.Snapshot, error) {
+	for i := len(r.results) - 1; i >= 0; i-- {
+		item := r.results[i]
+		if item.HeadSHA == head {
+			return gatestatus.Snapshot{Found: true, Source: true, State: item.State, Description: item.Description}, nil
+		}
+	}
+	return gatestatus.Snapshot{}, nil
+}
+
+func (r *recordingStatus) Publish(_ context.Context, result gatestatus.Result) error {
+	r.results = append(r.results, result)
+	return nil
+}
 
 func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 	if results, err := parseResults(nil); err != nil || len(results) != 0 {
@@ -60,6 +80,36 @@ func TestTrustedStatusInputIsBoundedAndFailClosed(t *testing.T) {
 	if results, err := parseResults(append(data, '\n')); err != nil || len(results) != 1 || !reflect.DeepEqual(results[0], r) {
 		t.Fatalf("valid trusted result rejected: %+v, %v", results, err)
 	}
+	// A rejected candidate and a separately validated candidate retain their
+	// own exact PR/head/base status even when discovered in the same scan.
+	failed := gatefailure.Record{SchemaVersion: 1, SofaPR: 12, HeadSHA: strings.Repeat("d", 40), BaseSHA: strings.Repeat("e", 40), RunID: 43, Reason: gatefailure.PinChanged}
+	failureData, err := json.Marshal(failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &recordingStatus{}
+	if err := runFailures(context.Background(), failureData, writer); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), data, writer); err != nil {
+		t.Fatal(err)
+	}
+	if len(writer.results) != 2 || writer.results[0].PRNumber != 12 || writer.results[0].HeadSHA != failed.HeadSHA || writer.results[0].State != gatestatus.Failure ||
+		writer.results[1].PRNumber != r.SofaPR || writer.results[1].HeadSHA != r.CandidateSHA || writer.results[1].BaseSHA != r.PRBaseSHA || writer.results[1].State != gatestatus.Success {
+		t.Fatalf("cross-PR status attribution: %+v", writer.results)
+	}
+	if err := runFailures(context.Background(), failureData, writer); err != nil || len(writer.results) != 2 {
+		t.Fatalf("targeted failure replay was not idempotent: %v, %+v", err, writer.results)
+	}
+	t.Setenv("SOFA_GATE_PR", "12")
+	if err := run(context.Background(), data, writer); err == nil || len(writer.results) != 2 {
+		t.Fatalf("PR 12 target accepted PR 2 success: %v, %+v", err, writer.results)
+	}
+	t.Setenv("SOFA_GATE_PR", "2")
+	if err := runFailures(context.Background(), failureData, writer); err == nil || len(writer.results) != 2 {
+		t.Fatalf("PR 2 target accepted PR 12 failure: %v, %+v", err, writer.results)
+	}
+	t.Setenv("SOFA_GATE_PR", "")
 	for _, invalid := range [][]byte{
 		[]byte(`{"schema_version":1}`),
 		[]byte(strings.Replace(string(data), r.SuiteID, "p2-"+strings.Repeat("d", 24), 1)),

@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kevinmartin/sofa-disposable/internal/gatefailure"
 )
 
 const (
@@ -39,6 +41,7 @@ const (
 
 var sha40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var errCandidateWorkflowPin = errors.New("candidate workflow command pin changed")
 
 type client struct {
 	http           *http.Client
@@ -135,17 +138,6 @@ func (c client) currentPR(ctx context.Context, number int) (pull, error) {
 	return p, nil
 }
 
-func (c client) listPRs(ctx context.Context) ([]pull, error) {
-	var list []pull
-	if err := c.get(ctx, "/repos/"+sofaRepo+"/pulls?state=open&per_page=100", &list); err != nil {
-		return nil, err
-	}
-	if len(list) == 100 {
-		return nil, errors.New("sofa PR discovery exceeded bounded page")
-	}
-	return list, nil
-}
-
 type gitRef struct {
 	Object struct {
 		SHA string `json:"sha"`
@@ -198,7 +190,7 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA string
 	}
 	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
 	if err != nil {
-		return errors.New("candidate workflow command pin changed")
+		return errCandidateWorkflowPin
 	}
 	digest := hash(content)
 	for _, wantHash := range wantHashes {
@@ -206,7 +198,7 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA string
 			return nil
 		}
 	}
-	return errors.New("candidate workflow command pin changed")
+	return errCandidateWorkflowPin
 }
 
 type workflowRun struct {
@@ -598,7 +590,7 @@ func unpackZIPExpected(data []byte, want map[string]bool) (map[string][]byte, er
 	out := make(map[string][]byte, len(want))
 	total := uint64(0)
 	for _, f := range zr.File {
-		if !want[f.Name] || f.FileInfo().Mode().IsRegular() == false || f.UncompressedSize64 > 2<<20 || f.CompressedSize64 > maxArtifactZip {
+		if !want[f.Name] || !f.FileInfo().Mode().IsRegular() || f.UncompressedSize64 > 2<<20 || f.CompressedSize64 > maxArtifactZip {
 			return nil, errors.New("unexpected hosted artifact entry")
 		}
 		if _, exists := out[f.Name]; exists {
@@ -1504,33 +1496,69 @@ jobs:
 }
 
 func run(ctx context.Context, c client) error {
+	return runWithObserver(ctx, c, c.observe)
+}
+
+func runWithObserver(ctx context.Context, c client, observe func(context.Context, pull) error) error {
 	manual := os.Getenv("SOFA_GATE_PR")
-	var prs []pull
-	if manual != "" {
-		n, err := strconv.Atoi(manual)
-		if err != nil || n < 1 {
-			return errors.New("invalid sofa PR number")
-		}
-		p, err := c.currentPR(ctx, n)
-		if err != nil {
-			return err
-		}
-		prs = []pull{p}
-	} else {
-		list, err := c.listPRs(ctx)
-		if err != nil {
-			return err
-		}
-		prs = list
+	n, err := strconv.Atoi(manual)
+	if err != nil || n < 1 {
+		return errors.New("trusted observer requires one sofa PR")
 	}
-	for _, listed := range prs {
-		p, err := c.currentPR(ctx, listed.Number)
-		if err != nil || p.Head.SHA != listed.Head.SHA || p.Base.SHA != listed.Base.SHA {
-			return errors.New("sofa PR changed during observation")
+	p, err := c.currentPR(ctx, n)
+	if err != nil {
+		return err
+	}
+	head, base := os.Getenv("SOFA_GATE_HEAD"), os.Getenv("SOFA_GATE_BASE")
+	if (head == "") != (base == "") || head != "" && (p.Head.SHA != head || p.Base.SHA != base) {
+		return errors.New("sofa PR changed since targeted dispatch")
+	}
+	if err := observe(ctx, p); err != nil {
+		// A moved or closed PR must not inherit a result for its old revision.
+		current, readErr := c.currentPR(ctx, n)
+		if readErr != nil {
+			var apiErr apiError
+			if errors.As(readErr, &apiErr) && apiErr.status == http.StatusNotFound {
+				return nil
+			}
+			// A transient read failure cannot authenticate a changed revision.
+			// The status writer independently rechecks the exact head and base.
+			if writeErr := writeFailure(p, err); writeErr != nil {
+				return writeErr
+			}
+			return nil
 		}
-		if err := c.observe(ctx, p); err != nil {
-			return fmt.Errorf("sofa PR %d: %w", p.Number, err)
+		if current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA {
+			return nil
 		}
+		if writeErr := writeFailure(p, err); writeErr != nil {
+			return writeErr
+		}
+		fmt.Printf("sofa PR %d observation rejected: %v\n", n, err)
+	}
+	return nil
+}
+
+func writeFailure(p pull, observationErr error) error {
+	path := os.Getenv("SOFA_GATE_FAILURE_PATH")
+	runID, err := strconv.ParseInt(os.Getenv("GITHUB_RUN_ID"), 10, 64)
+	if path == "" || err != nil {
+		return errors.New("trusted gate failure handoff unavailable")
+	}
+	reason := gatefailure.ObservationFailed
+	if errors.Is(observationErr, errCandidateWorkflowPin) {
+		reason = gatefailure.PinChanged
+	}
+	r := gatefailure.Record{SchemaVersion: 1, SofaPR: p.Number, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA, RunID: runID, Reason: reason}
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		return errors.New("cannot encode trusted gate failure")
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+		return errors.New("cannot write trusted gate failure")
 	}
 	return nil
 }
