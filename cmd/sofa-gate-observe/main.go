@@ -252,6 +252,9 @@ func (c client) verifyOfficialAction(ctx context.Context, pin actionpin.Pin) err
 		return err
 	}
 	if ref.Object.Type == "tag" {
+		if !sha40.MatchString(ref.Object.SHA) {
+			return errors.New("action release tag object SHA is invalid")
+		}
 		var tag struct {
 			Object struct {
 				Type string `json:"type"`
