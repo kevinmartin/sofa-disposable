@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kevinmartin/sofa-disposable/internal/actionpin"
 	"github.com/kevinmartin/sofa-disposable/internal/gatefailure"
 )
 
@@ -176,8 +177,8 @@ func (c client) content(ctx context.Context, path, ref string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
 }
 
-func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA string, wantHashes ...string) error {
-	if !sha40.MatchString(candidateSHA) {
+func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, baseSHA string, wantHashes ...string) error {
+	if !sha40.MatchString(candidateSHA) || !sha40.MatchString(baseSHA) {
 		return errors.New("candidate workflow revision invalid")
 	}
 	var item gitContent
@@ -198,7 +199,62 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA string
 			return nil
 		}
 	}
-	return errCandidateWorkflowPin
+	// Only the PR's current main-branch base can supply the trusted baseline.
+	// A stale base must be refreshed before a changed workflow is admitted.
+	var mainRef gitRef
+	if err := c.get(ctx, "/repos/"+sofaRepo+"/git/ref/heads/main", &mainRef); err != nil {
+		return err
+	}
+	if mainRef.Object.SHA != baseSHA {
+		return errCandidateWorkflowPin
+	}
+	var baseline gitContent
+	if err := c.get(ctx, "/repos/"+sofaRepo+"/contents/"+candidateWorkflowPath+"?ref="+baseSHA, &baseline); err != nil {
+		return err
+	}
+	if baseline.Encoding != "base64" || len(baseline.Content) > 2<<20 {
+		return errCandidateWorkflowPin
+	}
+	baseContent, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(baseline.Content, "\n", ""))
+	if err != nil {
+		return errCandidateWorkflowPin
+	}
+	pins, err := actionpin.Changes(baseContent, content)
+	if err != nil {
+		return errCandidateWorkflowPin
+	}
+	for _, pin := range pins {
+		if err := c.verifyOfficialAction(ctx, pin); err != nil {
+			return fmt.Errorf("%w: %v", errCandidateWorkflowPin, err)
+		}
+	}
+	return nil
+}
+
+func (c client) verifyOfficialAction(ctx context.Context, pin actionpin.Pin) error {
+	var release struct {
+		Draft      bool `json:"draft"`
+		Prerelease bool `json:"prerelease"`
+	}
+	if err := c.get(ctx, "/repos/"+pin.Name+"/releases/tags/"+pin.Tag, &release); err != nil {
+		return err
+	}
+	if release.Draft || release.Prerelease {
+		return errors.New("action release is not stable")
+	}
+	var ref struct {
+		Object struct {
+			Type string `json:"type"`
+			SHA  string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := c.get(ctx, "/repos/"+pin.Name+"/git/ref/tags/"+pin.Tag, &ref); err != nil {
+		return err
+	}
+	if ref.Object.Type != "commit" || ref.Object.SHA != pin.SHA {
+		return errors.New("action release tag does not resolve to pinned commit")
+	}
+	return nil
 }
 
 type workflowRun struct {
@@ -1288,7 +1344,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil {
 		return err
 	}
-	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, candidateWorkflowHash, candidateWorkflowSafeHash); err != nil {
+	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, p.Base.SHA, candidateWorkflowHash, candidateWorkflowSafeHash); err != nil {
 		return err
 	}
 	files, artifactID, err := c.reportArtifact(ctx, r, suite)
