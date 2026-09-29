@@ -574,7 +574,10 @@ func discoverAndDispatch(ctx context.Context, a api) error {
 		return nil
 	}
 	mainRef, ok, err := a.branch(ctx, "main")
-	if err != nil || !ok || !shaPattern.MatchString(mainRef.Object.SHA) {
+	if err != nil {
+		return fmt.Errorf("disposable main identity unavailable: %w", err)
+	}
+	if !ok || !shaPattern.MatchString(mainRef.Object.SHA) {
 		return errors.New("disposable main identity unavailable")
 	}
 	token, err := a.statusWriter().DispatchToken(ctx)
@@ -586,7 +589,7 @@ func discoverAndDispatch(ctx context.Context, a api) error {
 		p, err := a.currentPR(ctx, listed.Number)
 		if err != nil {
 			failed++
-			fmt.Printf("PR %d discovery read failed; continuing\n", listed.Number)
+			fmt.Printf("PR %d discovery read failed (%v); continuing\n", listed.Number, err)
 			continue
 		}
 		if p.Head.SHA != listed.Head.SHA || p.Base.SHA != listed.Base.SHA {
