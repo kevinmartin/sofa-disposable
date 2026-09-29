@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -108,9 +110,9 @@ func TestCompletedSuiteItemCannotDispatchButAllowsObserverReplay(t *testing.T) {
 
 func TestCompletedSuiteCannotRecreateRetiredCallerRef(t *testing.T) {
 	t.Setenv("SOFA_GATE_PR", "2")
-	t.Setenv("SOFA_GATE_HEAD", "")
-	t.Setenv("SOFA_GATE_BASE", "")
 	p := testPull(strings.Repeat("a", 40), strings.Repeat("b", 40))
+	t.Setenv("SOFA_GATE_HEAD", p.Head.SHA)
+	t.Setenv("SOFA_GATE_BASE", p.Base.SHA)
 	base := strings.Repeat("c", 40)
 	suite := suiteID(p, base)
 	gate := &fakeFixtureGate{closed: true}
@@ -132,8 +134,15 @@ func TestCompletedSuiteCannotRecreateRetiredCallerRef(t *testing.T) {
 			return nil, nil
 		}
 	})}}
-	if err := run(context.Background(), a); err != nil || len(gate.seen) != 1 || len(status.published) != 0 {
+	if err := run(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), a); err != nil || len(gate.seen) != 2 || len(status.published) != 0 {
 		t.Fatalf("completed suite replay was not inert: err=%v, Project reads=%d, statuses=%+v", err, len(gate.seen), status.published)
+	}
+	t.Setenv("SOFA_GATE_BASE", strings.Repeat("f", 40))
+	if err := run(context.Background(), a); err == nil || len(gate.seen) != 2 || len(status.published) != 0 {
+		t.Fatalf("stale targeted base changed completed suite: err=%v Project reads=%d statuses=%+v", err, len(gate.seen), status.published)
 	}
 }
 
@@ -246,7 +255,7 @@ func TestEnsureBranchUsesScopedCredentialForEveryGitWrite(t *testing.T) {
 		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}}
-	branch, err := a.ensureBranch(context.Background(), p)
+	branch, err := a.ensureBranchGuarded(context.Background(), p, nil)
 	if err != nil || branch != "sofa-e2e/"+suiteID(p, base) || len(writes) != 3 || !strings.HasSuffix(writes[0], "/git/trees") || !strings.HasSuffix(writes[1], "/git/commits") || !strings.HasSuffix(writes[2], "/git/refs") {
 		t.Fatalf("unexpected suite writes: branch=%q writes=%v err=%v", branch, writes, err)
 	}
@@ -283,7 +292,7 @@ func TestHostedDispatchRetriesStayWithinOriginalBudget(t *testing.T) {
 	}
 }
 
-func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
+func TestDiscoveryDispatchesEachPRAsAnExactTargetedRun(t *testing.T) {
 	for _, key := range []string{"SOFA_GATE_PR", "SOFA_GATE_HEAD", "SOFA_GATE_BASE", "SOFA_GATE_APP_ID", "SOFA_GATE_APP_PRIVATE_KEY"} {
 		t.Setenv(key, "")
 	}
@@ -295,7 +304,7 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 		body, _ := json.Marshal(value)
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
 	}
-	dispatched := ""
+	dispatched := make(map[string]map[string]string)
 	status := &fakeGateStatus{dispatchToken: "app-actions-token"}
 	a := api{token: "read-dispatch-token", workflowToken: "workflow-token", status: status, fixture: &fakeFixtureGate{}, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		path := r.URL.Path
@@ -329,21 +338,125 @@ func TestExhaustedSuiteDoesNotStarveLaterPRDiscovery(t *testing.T) {
 				t.Fatal("dispatch did not use the disposable-scoped App token")
 			}
 			var request struct {
-				Ref string `json:"ref"`
+				Ref    string            `json:"ref"`
+				Inputs map[string]string `json:"inputs"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Fatal(err)
 			}
-			dispatched = request.Ref
+			if request.Ref != "main" {
+				t.Fatalf("targeted gate must use trusted main: %q", request.Ref)
+			}
+			dispatched[request.Inputs["sofa_pr"]] = request.Inputs
 			return respond(204, nil)
 		default:
-			t.Fatal(fmt.Sprintf("unexpected GitHub API request %s %s", r.Method, path))
+			t.Fatalf("unexpected GitHub API request %s %s", r.Method, path)
 			return nil, nil
 		}
 	})}}
 	err := run(context.Background(), a)
-	if err == nil || !strings.Contains(err.Error(), "1 hosted suite(s) exhausted") || dispatched != "sofa-e2e/"+suiteID(p2, mainSHA) {
-		t.Fatalf("first exhausted suite starved later PR: dispatched=%q err=%v", dispatched, err)
+	if err != nil || len(dispatched) != 2 || dispatched["1"]["candidate_sha"] != p1.Head.SHA ||
+		dispatched["1"]["base_sha"] != p1.Base.SHA || dispatched["2"]["candidate_sha"] != p2.Head.SHA ||
+		dispatched["2"]["base_sha"] != p2.Base.SHA {
+		t.Fatalf("discovery did not dispatch exact independent PRs: dispatched=%v err=%v", dispatched, err)
+	}
+}
+
+func TestDiscoveryFailureDoesNotBorrowAnotherPRIdentity(t *testing.T) {
+	t.Setenv("SOFA_GATE_PR", "")
+	t.Setenv("SOFA_GATE_HEAD", "")
+	t.Setenv("SOFA_GATE_BASE", "")
+	t.Setenv("GITHUB_RUN_ID", "55")
+	p1, p2 := testPull(strings.Repeat("a", 40), strings.Repeat("b", 40)), testPull(strings.Repeat("c", 40), strings.Repeat("d", 40))
+	p1.Number = 1
+	respond := func(status int, value any) (*http.Response, error) {
+		body, _ := json.Marshal(value)
+		return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+	}
+	var dispatched []string
+	status := &fakeGateStatus{dispatchToken: "app-actions-token"}
+	a := api{token: "read-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls":
+			return respond(200, []pull{p1, p2})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls/1":
+			return respond(200, p1)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls/2":
+			return respond(200, p2)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+disposableRepo+"/git/ref/heads/main":
+			return respond(200, map[string]any{"object": map[string]string{"sha": strings.Repeat("e", 40)}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/actions/workflows/sofa-gate.yml/dispatches"):
+			if r.Header.Get("Authorization") != "Bearer app-actions-token" {
+				t.Fatal("dispatch used a non-App credential")
+			}
+			var request struct {
+				Inputs map[string]string `json:"inputs"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			dispatched = append(dispatched, request.Inputs["sofa_pr"])
+			if request.Inputs["sofa_pr"] == "1" {
+				return respond(403, nil)
+			}
+			if request.Inputs["candidate_sha"] != p2.Head.SHA || request.Inputs["base_sha"] != p2.Base.SHA {
+				t.Fatal("second PR borrowed another identity")
+			}
+			return respond(204, nil)
+		default:
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL)
+			return nil, nil
+		}
+	})}}
+	if err := run(context.Background(), a); err == nil || !strings.Contains(err.Error(), "1 sofa PR discovery item") {
+		t.Fatalf("failed PR should be reported after continuing discovery: %v", err)
+	}
+	if len(dispatched) != 2 || dispatched[0] != "1" || dispatched[1] != "2" ||
+		len(status.published) != 1 || status.published[0].PRNumber != 1 || status.published[0].HeadSHA != p1.Head.SHA || status.published[0].State != gatestatus.Failure {
+		t.Fatalf("cross-PR dispatch/status interference: dispatches=%v statuses=%+v", dispatched, status.published)
+	}
+}
+
+func TestChangedPRIsNotDispatchedOrAttributedToItsOldRevision(t *testing.T) {
+	t.Setenv("SOFA_GATE_PR", "")
+	t.Setenv("SOFA_GATE_HEAD", "")
+	t.Setenv("SOFA_GATE_BASE", "")
+	listed, other := testPull(strings.Repeat("a", 40), strings.Repeat("b", 40)), testPull(strings.Repeat("c", 40), strings.Repeat("d", 40))
+	listed.Number = 1
+	changed := listed
+	changed.Head.SHA = strings.Repeat("f", 40)
+	status := &fakeGateStatus{dispatchToken: "app-actions-token"}
+	var dispatched []string
+	a := api{token: "read-token", status: status, http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		respond := func(value any) (*http.Response, error) {
+			data, _ := json.Marshal(value)
+			return testResponse(200, string(data)), nil
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls":
+			return respond([]pull{listed, other})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls/1":
+			return respond(changed)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+sofaRepo+"/pulls/2":
+			return respond(other)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/"+disposableRepo+"/git/ref/heads/main":
+			return respond(map[string]any{"object": map[string]string{"sha": strings.Repeat("e", 40)}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/actions/workflows/sofa-gate.yml/dispatches"):
+			var request struct {
+				Inputs map[string]string `json:"inputs"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			dispatched = append(dispatched, request.Inputs["sofa_pr"])
+			return testResponse(204, ""), nil
+		default:
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL)
+			return nil, nil
+		}
+	})}}
+	if err := run(context.Background(), a); err != nil || len(dispatched) != 1 || dispatched[0] != "2" || len(status.published) != 0 {
+		t.Fatalf("changed PR was dispatched or attributed: dispatches=%v statuses=%+v err=%v", dispatched, status.published, err)
 	}
 }
 
@@ -579,6 +692,11 @@ func btoi(v bool) int {
 
 func testResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
+}
+
+func denialSuiteID(p pull, consumerBase, kind string) string {
+	digest := sha256.Sum256([]byte(suiteID(p, consumerBase) + ":denied:" + kind))
+	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
 }
 
 func testPull(head, base string) pull {

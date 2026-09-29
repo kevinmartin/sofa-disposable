@@ -46,6 +46,8 @@ func completionWakeContract(data, wakeup []byte) error {
 		"startsWith(github.event.workflow_run.head_branch, 'sofa-e2e/')",
 		"uses: ./.github/workflows/sofa-gate.yml",
 		"secrets: inherit",
+		"sofa_pr: ${{ needs.identify.outputs.sofa_pr }}",
+		`^sofa-e2e/p([1-9][0-9]*)-[0-9a-f]{24}$`,
 		"actions: write",
 		"issues: write",
 	} {
@@ -53,7 +55,8 @@ func completionWakeContract(data, wakeup []byte) error {
 			return fmt.Errorf("trusted completion wake missing %q", required)
 		}
 	}
-	if strings.Contains(wake, "actions/checkout@") || strings.Contains(wake, "\n      run:") || strings.Contains(wake, "ref: ${{ github.event.workflow_run") {
+	if strings.Contains(wake, "actions/checkout@") || strings.Contains(wake, "ref: ${{ github.event.workflow_run") ||
+		strings.Count(wake, "run: |") != 1 || !strings.Contains(wake, "HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}") {
 		return fmt.Errorf("completion wake executes untrusted candidate data")
 	}
 	coordinate := strings.Index(text, "\n  coordinate:\n")
@@ -136,7 +139,7 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 		t.Fatal(err)
 	}
 	text := string(data)
-	names := []string{"coordinate", "observe", "complete-project", "cleanup-owned", "status"}
+	names := []string{"coordinate", "observe", "complete-project", "cleanup-owned", "status", "status-failure"}
 	jobs := make(map[string]string, len(names))
 	for i, name := range names {
 		start := strings.Index(text, "\n  "+name+":\n")
@@ -152,7 +155,7 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 		}
 		jobs[name] = text[start:end]
 	}
-	if !strings.Contains(jobs["observe"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["complete-project"], "SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}") || !strings.Contains(jobs["cleanup-owned"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["status"], "SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}") {
+	if !strings.Contains(jobs["observe"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["complete-project"], "SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}") || !strings.Contains(jobs["cleanup-owned"], "SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}") || !strings.Contains(jobs["status"], "SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}") || !strings.Contains(jobs["status-failure"], "SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}") {
 		t.Fatal("trusted credential owner job missing")
 	}
 	for _, tc := range []struct {
@@ -163,6 +166,7 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 		{"complete-project", []string{"SOFA_PUBLISH_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY"}},
 		{"cleanup-owned", []string{"SOFA_PROJECTS_TOKEN", "SOFA_GATE_APP_PRIVATE_KEY", "issues: write"}},
 		{"status", []string{"SOFA_PUBLISH_TOKEN", "SOFA_PROJECTS_TOKEN", "issues: write"}},
+		{"status-failure", []string{"SOFA_PUBLISH_TOKEN", "SOFA_PROJECTS_TOKEN", "issues: write"}},
 	} {
 		for _, secret := range tc.forbidden {
 			if strings.Contains(jobs[tc.name], secret) {
@@ -173,9 +177,19 @@ func TestTrustedGateKeepsPublisherProjectAndStatusCredentialsInSeparateJobs(t *t
 	if !strings.Contains(jobs["complete-project"], "needs: observe") || !strings.Contains(jobs["cleanup-owned"], "needs: complete-project") || !strings.Contains(jobs["status"], "needs: cleanup-owned") || !strings.Contains(jobs["status"], "SOFA_GATE_RESULT_PATH: gate-results-cleaned.jsonl") {
 		t.Fatal("owned resource cleanup no longer precedes App success")
 	}
+	if !strings.Contains(jobs["observe"], "inputs.sofa_pr != ''") ||
+		!strings.Contains(jobs["complete-project"], "needs.observe.outputs.success == 'true'") ||
+		!strings.Contains(jobs["status-failure"], "needs.observe.outputs.failure == 'true'") ||
+		!strings.Contains(jobs["status-failure"], "SOFA_GATE_FAILURE_PATH: gate-failures.jsonl") {
+		t.Fatal("targeted failure must bypass only the success lifecycle")
+	}
 	for _, artifact := range []string{"observed", "complete", "cleaned"} {
 		name := "sofa-e2e-" + artifact + "-${{ github.run_id }}"
-		if strings.Count(text, name) != 2 || strings.Contains(text, name+"-${{ github.run_attempt }}") {
+		want := 2
+		if artifact == "observed" {
+			want = 3 // Success lifecycle and failure status each consume the report.
+		}
+		if strings.Count(text, name) != want || strings.Contains(text, name+"-${{ github.run_attempt }}") {
 			t.Fatalf("trusted %s artifact is not stable across failed-job retries", artifact)
 		}
 	}

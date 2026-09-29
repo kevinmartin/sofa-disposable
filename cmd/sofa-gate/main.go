@@ -229,10 +229,6 @@ func (a api) get(ctx context.Context, path string, output any) error {
 	return a.request(ctx, http.MethodGet, path, a.token, nil, output)
 }
 
-func (a api) post(ctx context.Context, path string, input, output any) error {
-	return a.request(ctx, http.MethodPost, path, a.token, input, output)
-}
-
 func (a api) postWorkflow(ctx context.Context, path string, input, output any) error {
 	if a.workflowToken == "" {
 		return errors.New("disposable workflow-authoring credential unavailable")
@@ -242,13 +238,6 @@ func (a api) postWorkflow(ctx context.Context, path string, input, output any) e
 
 func suiteID(p pull, consumerBase string) string {
 	digest := sha256.Sum256([]byte(p.Head.SHA + ":" + p.Base.SHA + ":" + consumerBase))
-	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
-}
-
-func denialSuiteID(p pull, consumerBase, kind string) string {
-	// Each reusable call uploads artifacts under its suite ID and GitHub run
-	// identity. Distinct IDs keep both denial reports separate from the edit.
-	digest := sha256.Sum256([]byte(suiteID(p, consumerBase) + ":denied:" + kind))
 	return fmt.Sprintf("p%d-%x", p.Number, digest[:12])
 }
 
@@ -299,10 +288,6 @@ func (a api) branch(ctx context.Context, name string) (ref, bool, error) {
 		return r, false, nil
 	}
 	return r, err == nil, err
-}
-
-func (a api) ensureBranch(ctx context.Context, p pull) (string, error) {
-	return a.ensureBranchGuarded(ctx, p, nil)
 }
 
 func (a api) ensureBranchGuarded(ctx context.Context, p pull, guard func(context.Context, pull, string) error) (string, error) {
@@ -577,12 +562,72 @@ func newestRun(list runList) workflowRun {
 	return newest
 }
 
+// Discovery starts one trusted main-branch workflow per exact PR revision.
+// Each targeted run owns its own observer artifact and lifecycle chain, so a
+// rejected candidate cannot skip another PR's status or cleanup jobs.
+func discoverAndDispatch(ctx context.Context, a api) error {
+	prs, err := a.listPRs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(prs) == 0 {
+		return nil
+	}
+	mainRef, ok, err := a.branch(ctx, "main")
+	if err != nil {
+		return fmt.Errorf("disposable main identity unavailable: %w", err)
+	}
+	if !ok || !shaPattern.MatchString(mainRef.Object.SHA) {
+		return errors.New("disposable main identity unavailable")
+	}
+	token, err := a.statusWriter().DispatchToken(ctx)
+	if err != nil {
+		return fmt.Errorf("disposable gate dispatch credential unavailable: %w", err)
+	}
+	failed := 0
+	for _, listed := range prs {
+		p, err := a.currentPR(ctx, listed.Number)
+		if err != nil {
+			failed++
+			fmt.Printf("PR %d discovery read failed (%v); continuing\n", listed.Number, err)
+			continue
+		}
+		if p.Head.SHA != listed.Head.SHA || p.Base.SHA != listed.Base.SHA {
+			fmt.Printf("PR %d changed during discovery; awaiting next scan\n", p.Number)
+			continue
+		}
+		status, err := a.statusWriter().Latest(ctx, p.Head.SHA)
+		if err == nil && status.Found && status.Source &&
+			(status.State == gatestatus.Success && status.Description == suiteDescription(suiteID(p, mainRef.Object.SHA), gatestatus.Success) ||
+				status.State == gatestatus.Failure && status.Description == "Hosted E2E candidate workflow pin changed") {
+			continue
+		}
+		inputs := map[string]string{"sofa_pr": strconv.Itoa(p.Number), "candidate_sha": p.Head.SHA, "base_sha": p.Base.SHA}
+		if err := a.request(ctx, http.MethodPost, "/repos/"+disposableRepo+"/actions/workflows/sofa-gate.yml/dispatches", token,
+			map[string]any{"ref": "main", "inputs": inputs}, nil); err != nil {
+			failed++
+			if publishErr := a.publishFailure(ctx, p, "Hosted E2E dispatch failure", coordinatorRunURL()); publishErr != nil {
+				fmt.Printf("PR %d dispatch and failure status unavailable; continuing\n", p.Number)
+			}
+			continue
+		}
+		fmt.Printf("PR %d exact hosted gate dispatched\n", p.Number)
+	}
+	if failed != 0 {
+		return fmt.Errorf("%d sofa PR discovery item(s) failed", failed)
+	}
+	return nil
+}
+
 func run(ctx context.Context, a api) error {
 	manual := os.Getenv("SOFA_GATE_PR")
 	head := os.Getenv("SOFA_GATE_HEAD")
 	base := os.Getenv("SOFA_GATE_BASE")
 	if (head == "") != (base == "") || (manual == "" && head != "") || (head != "" && (!shaPattern.MatchString(head) || !shaPattern.MatchString(base))) {
 		return errors.New("dispatch inputs are incomplete or invalid")
+	}
+	if manual == "" {
+		return discoverAndDispatch(ctx, a)
 	}
 	var prs []pull
 	if manual != "" {

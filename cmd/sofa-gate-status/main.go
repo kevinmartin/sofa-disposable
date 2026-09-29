@@ -12,9 +12,11 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/kevinmartin/sofa-disposable/internal/gatefailure"
 	"github.com/kevinmartin/sofa-disposable/internal/gatestatus"
 )
 
@@ -165,15 +167,73 @@ func parseResults(data []byte) ([]observed, error) {
 	return results, nil
 }
 
-func run(ctx context.Context, data []byte, writer gatestatus.Writer) error {
+type statusPublisher interface {
+	Publish(context.Context, gatestatus.Result) error
+}
+
+func run(ctx context.Context, data []byte, writer statusPublisher) error {
 	results, err := parseResults(data)
 	if err != nil {
 		return err
 	}
+	if len(results) > 1 {
+		return errors.New("targeted gate has multiple success results")
+	}
 	for _, r := range results {
+		if err := exactTarget(r.SofaPR); err != nil {
+			return err
+		}
 		status := gatestatus.Result{PRNumber: r.SofaPR, HeadSHA: r.CandidateSHA, BaseSHA: r.PRBaseSHA, State: gatestatus.Success, RunURL: r.CandidateRunURL, Description: fmt.Sprintf("Hosted E2E %s success", r.SuiteID)}
 		if err := writer.Publish(ctx, status); err != nil {
 			return fmt.Errorf("publish sofa PR %d gate status: %w", r.SofaPR, err)
+		}
+	}
+	return nil
+}
+
+type failureWriter interface {
+	Latest(context.Context, string) (gatestatus.Snapshot, error)
+	Publish(context.Context, gatestatus.Result) error
+}
+
+func runFailures(ctx context.Context, data []byte, writer failureWriter) error {
+	records, err := gatefailure.Parse(data)
+	if err != nil {
+		return err
+	}
+	if len(records) > 1 {
+		return errors.New("targeted gate has multiple failure results")
+	}
+	for _, r := range records {
+		if err := exactTarget(r.SofaPR); err != nil {
+			return err
+		}
+		description := "Hosted E2E observation failure"
+		if r.Reason == gatefailure.PinChanged {
+			description = "Hosted E2E candidate workflow pin changed"
+		}
+		previous, readErr := writer.Latest(ctx, r.HeadSHA)
+		if readErr == nil && previous.Found && previous.Source && previous.State == gatestatus.Failure && previous.Description == description {
+			continue
+		}
+		result := gatestatus.Result{
+			PRNumber: r.SofaPR, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA,
+			State:       gatestatus.Failure,
+			RunURL:      fmt.Sprintf("https://github.com/kevinmartin/sofa-disposable/actions/runs/%d", r.RunID),
+			Description: description,
+		}
+		if err := writer.Publish(ctx, result); err != nil {
+			return fmt.Errorf("publish sofa PR %d gate failure: %w", r.SofaPR, err)
+		}
+	}
+	return nil
+}
+
+func exactTarget(number int) error {
+	if target := os.Getenv("SOFA_GATE_PR"); target != "" {
+		parsed, err := strconv.Atoi(target)
+		if err != nil || parsed < 1 || parsed != number {
+			return errors.New("trusted gate result does not match targeted PR")
 		}
 	}
 	return nil
@@ -184,8 +244,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "trusted status writer identity unavailable")
 		os.Exit(1)
 	}
-	path := os.Getenv("SOFA_GATE_RESULT_PATH")
-	if path == "" || strings.ContainsRune(path, '\x00') {
+	if target, err := strconv.Atoi(os.Getenv("SOFA_GATE_PR")); err != nil || target < 1 {
+		fmt.Fprintln(os.Stderr, "trusted status target unavailable")
+		os.Exit(1)
+	}
+	path, failurePath := os.Getenv("SOFA_GATE_RESULT_PATH"), os.Getenv("SOFA_GATE_FAILURE_PATH")
+	if (path == "") == (failurePath == "") {
+		fmt.Fprintln(os.Stderr, "trusted observer result path unavailable")
+		os.Exit(1)
+	}
+	if failurePath != "" {
+		path = failurePath
+	}
+	if strings.ContainsRune(path, '\x00') {
 		fmt.Fprintln(os.Stderr, "trusted observer result path unavailable")
 		os.Exit(1)
 	}
@@ -197,7 +268,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	w := gatestatus.Writer{AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")}
-	if err := run(ctx, data, w); err != nil {
+	if failurePath != "" {
+		err = runFailures(ctx, data, w)
+	} else {
+		err = run(ctx, data, w)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "sofa gate status:", err)
 		os.Exit(1)
 	}

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kevinmartin/sofa-disposable/internal/gatefailure"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -42,6 +44,56 @@ func TestCandidateCommandPinRejectsWorkflowDrift(t *testing.T) {
 	}
 	if err := c.verifyCandidateCommands(context.Background(), "main", hash([]byte(content))); err == nil {
 		t.Fatal("mutable candidate workflow ref accepted")
+	}
+}
+
+func TestTargetedObserverRejectsChangedPinWithoutSuccessOrPublication(t *testing.T) {
+	p := testPull()
+	t.Setenv("SOFA_GATE_PR", "2")
+	t.Setenv("SOFA_GATE_HEAD", p.Head.SHA)
+	t.Setenv("SOFA_GATE_BASE", p.Base.SHA)
+	t.Setenv("GITHUB_RUN_ID", "43")
+	failurePath := filepath.Join(t.TempDir(), "gate-failures.jsonl")
+	t.Setenv("SOFA_GATE_FAILURE_PATH", failurePath)
+	successPath := filepath.Join(t.TempDir(), "gate-results.jsonl")
+	t.Setenv("SOFA_GATE_RESULT_PATH", successPath)
+	reads, publications := 0, 0
+	c := client{token: "read", publisherToken: "write", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/"+sofaRepo+"/pulls/2" {
+			publications++
+			return nil, fmt.Errorf("unexpected observer request %s %s", r.Method, r.URL)
+		}
+		reads++
+		data, _ := json.Marshal(p)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+	})}}
+	if err := runWithObserver(context.Background(), c, func(_ context.Context, got pull) error {
+		if got.Number != p.Number || got.Head.SHA != p.Head.SHA {
+			t.Fatal("observer received wrong PR")
+		}
+		return errCandidateWorkflowPin
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(failurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := gatefailure.Parse(data)
+	if err != nil || len(records) != 1 || records[0].Reason != gatefailure.PinChanged || records[0].HeadSHA != p.Head.SHA ||
+		records[0].BaseSHA != p.Base.SHA || records[0].SofaPR != p.Number || records[0].RunID != 43 || reads != 2 || publications != 0 {
+		t.Fatalf("pin failure handoff was not exact: records=%+v reads=%d publications=%d err=%v", records, reads, publications, err)
+	}
+	if _, err := os.Stat(successPath); !os.IsNotExist(err) {
+		t.Fatalf("rejected observer wrote success report: %v", err)
+	}
+	// A stale targeted input must never observe or report the new revision.
+	t.Setenv("SOFA_GATE_HEAD", strings.Repeat("f", 40))
+	if err := runWithObserver(context.Background(), c, func(context.Context, pull) error {
+		t.Fatal("stale PR was observed")
+		return nil
+	}); err == nil {
+		t.Fatal("stale targeted head accepted")
 	}
 }
 
