@@ -56,13 +56,15 @@ func TestCandidatePinOnlyUpdateRequiresTrustedBaseAndOfficialRelease(t *testing.
 	base := []byte("name: candidate\n  - uses: actions/checkout@" + oldPin + " # v4.2.2\n    with:\n      persist-credentials: false\n")
 	candidate := []byte(strings.Replace(string(base), oldPin+" # v4.2.2", newPin+" # v7.0.1", 1))
 	for _, scenario := range []struct {
-		name, content, mainSHA, releaseSHA string
-		wantSuccess                        bool
+		name, content, mainSHA, releaseSHA, tagType string
+		wantSuccess                                 bool
 	}{
-		{"pin only", string(candidate), baseSHA, newPin, true},
-		{"untrusted release", string(candidate), baseSHA, oldPin, false},
-		{"stale base", string(candidate), strings.Repeat("d", 40), newPin, false},
-		{"changed command", string(candidate) + "  - run: echo bypass\n", baseSHA, newPin, false},
+		{"pin only", string(candidate), baseSHA, newPin, "commit", true},
+		{"annotated release", string(candidate), baseSHA, newPin, "tag", true},
+		{"untrusted release", string(candidate), baseSHA, oldPin, "commit", false},
+		{"annotated untrusted release", string(candidate), baseSHA, oldPin, "tag", false},
+		{"stale base", string(candidate), strings.Repeat("d", 40), newPin, "commit", false},
+		{"changed command", string(candidate) + "  - run: echo bypass\n", baseSHA, newPin, "commit", false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			c := client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -79,6 +81,15 @@ func TestCandidatePinOnlyUpdateRequiresTrustedBaseAndOfficialRelease(t *testing.
 				case "/repos/actions/checkout/releases/tags/v7.0.1":
 					response = map[string]bool{"draft": false, "prerelease": false}
 				case "/repos/actions/checkout/git/ref/tags/v7.0.1":
+					sha := scenario.releaseSHA
+					if scenario.tagType == "tag" {
+						sha = strings.Repeat("e", 40)
+					}
+					response = map[string]any{"object": map[string]string{"type": scenario.tagType, "sha": sha}}
+				case "/repos/actions/checkout/git/tags/" + strings.Repeat("e", 40):
+					if scenario.tagType != "tag" {
+						return nil, fmt.Errorf("unexpected annotated tag lookup")
+					}
 					response = map[string]any{"object": map[string]string{"type": "commit", "sha": scenario.releaseSHA}}
 				default:
 					return nil, fmt.Errorf("unexpected observer request %s", r.URL)

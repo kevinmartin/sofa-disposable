@@ -225,7 +225,7 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, baseS
 	}
 	for _, pin := range pins {
 		if err := c.verifyOfficialAction(ctx, pin); err != nil {
-			return fmt.Errorf("%w: %v", errCandidateWorkflowPin, err)
+			return fmt.Errorf("%w: %w", errCandidateWorkflowPin, err)
 		}
 	}
 	return nil
@@ -250,6 +250,18 @@ func (c client) verifyOfficialAction(ctx context.Context, pin actionpin.Pin) err
 	}
 	if err := c.get(ctx, "/repos/"+pin.Name+"/git/ref/tags/"+pin.Tag, &ref); err != nil {
 		return err
+	}
+	if ref.Object.Type == "tag" {
+		var tag struct {
+			Object struct {
+				Type string `json:"type"`
+				SHA  string `json:"sha"`
+			} `json:"object"`
+		}
+		if err := c.get(ctx, "/repos/"+pin.Name+"/git/tags/"+ref.Object.SHA, &tag); err != nil {
+			return err
+		}
+		ref.Object = tag.Object
 	}
 	if ref.Object.Type != "commit" || ref.Object.SHA != pin.SHA {
 		return errors.New("action release tag does not resolve to pinned commit")
