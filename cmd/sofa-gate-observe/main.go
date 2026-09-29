@@ -32,12 +32,8 @@ const (
 	consumerRepo          = "kevinmartin/sofa-disposable"
 	workflowPath          = ".github/workflows/sofa-gate.yml"
 	candidateWorkflowPath = ".github/workflows/e2e-fake.yml"
-	// Keep the original candidate pin valid for in-flight suites while allowing
-	// the reviewed sentinel assignment/export fix in sofa PR #5.
-	candidateWorkflowHash     = "53c9a95c2ecc5a8c7e3cbb98a796105c75923705c3e13178bd904d3f03d8dbaf"
-	candidateWorkflowSafeHash = "56496b0276e6681d8e4a995c6580ad48a43051ee7b1e4563fb791f44c101858a"
-	fixturePath               = "fixture/greeting.go"
-	maxArtifactZip            = 8 << 20
+	fixturePath           = "fixture/greeting.go"
+	maxArtifactZip        = 8 << 20
 )
 
 var sha40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -177,7 +173,7 @@ func (c client) content(ctx context.Context, path, ref string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
 }
 
-func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, baseSHA string, wantHashes ...string) error {
+func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, baseSHA string) error {
 	if !sha40.MatchString(candidateSHA) || !sha40.MatchString(baseSHA) {
 		return errors.New("candidate workflow revision invalid")
 	}
@@ -192,12 +188,6 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, baseS
 	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(item.Content, "\n", ""))
 	if err != nil {
 		return errCandidateWorkflowPin
-	}
-	digest := hash(content)
-	for _, wantHash := range wantHashes {
-		if digest == wantHash {
-			return nil
-		}
 	}
 	// Only the PR's current main-branch base can supply the trusted baseline.
 	// A stale base must be refreshed before a changed workflow is admitted.
@@ -219,55 +209,8 @@ func (c client) verifyCandidateCommands(ctx context.Context, candidateSHA, baseS
 	if err != nil {
 		return errCandidateWorkflowPin
 	}
-	pins, err := actionpin.Changes(baseContent, content)
-	if err != nil {
+	if !actionpin.Equivalent(baseContent, content) {
 		return errCandidateWorkflowPin
-	}
-	for _, pin := range pins {
-		if err := c.verifyOfficialAction(ctx, pin); err != nil {
-			return fmt.Errorf("%w: %w", errCandidateWorkflowPin, err)
-		}
-	}
-	return nil
-}
-
-func (c client) verifyOfficialAction(ctx context.Context, pin actionpin.Pin) error {
-	var release struct {
-		Draft      bool `json:"draft"`
-		Prerelease bool `json:"prerelease"`
-	}
-	if err := c.get(ctx, "/repos/"+pin.Name+"/releases/tags/"+pin.Tag, &release); err != nil {
-		return err
-	}
-	if release.Draft || release.Prerelease {
-		return errors.New("action release is not stable")
-	}
-	var ref struct {
-		Object struct {
-			Type string `json:"type"`
-			SHA  string `json:"sha"`
-		} `json:"object"`
-	}
-	if err := c.get(ctx, "/repos/"+pin.Name+"/git/ref/tags/"+pin.Tag, &ref); err != nil {
-		return err
-	}
-	if ref.Object.Type == "tag" {
-		if !sha40.MatchString(ref.Object.SHA) {
-			return errors.New("action release tag object SHA is invalid")
-		}
-		var tag struct {
-			Object struct {
-				Type string `json:"type"`
-				SHA  string `json:"sha"`
-			} `json:"object"`
-		}
-		if err := c.get(ctx, "/repos/"+pin.Name+"/git/tags/"+ref.Object.SHA, &tag); err != nil {
-			return err
-		}
-		ref.Object = tag.Object
-	}
-	if ref.Object.Type != "commit" || ref.Object.SHA != pin.SHA {
-		return errors.New("action release tag does not resolve to pinned commit")
 	}
 	return nil
 }
@@ -1359,7 +1302,7 @@ func (c client) observe(ctx context.Context, p pull) error {
 	if err != nil {
 		return err
 	}
-	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, p.Base.SHA, candidateWorkflowHash, candidateWorkflowSafeHash); err != nil {
+	if err := c.verifyCandidateCommands(ctx, p.Head.SHA, p.Base.SHA); err != nil {
 		return err
 	}
 	files, artifactID, err := c.reportArtifact(ctx, r, suite)
