@@ -26,6 +26,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 func TestCandidateCommandPinRejectsWorkflowDrift(t *testing.T) {
 	const content = "name: reviewed candidate workflow\n"
 	sha := strings.Repeat("a", 40)
+	baseSHA := strings.Repeat("b", 40)
 	c := client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/repos/kevinmartin/sofa/contents/.github/workflows/e2e-fake.yml" || r.URL.Query().Get("ref") != sha {
 			return nil, fmt.Errorf("unexpected candidate workflow request %s", r.URL.String())
@@ -33,17 +34,74 @@ func TestCandidateCommandPinRejectsWorkflowDrift(t *testing.T) {
 		data, _ := json.Marshal(gitContent{Content: base64.StdEncoding.EncodeToString([]byte(content)), Encoding: "base64"})
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
 	})}}
-	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content))); err != nil {
+	if err := c.verifyCandidateCommands(context.Background(), sha, baseSHA, hash([]byte(content))); err != nil {
 		t.Fatal("reviewed command source rejected", err)
 	}
-	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content+"old")), hash([]byte(content))); err != nil {
+	if err := c.verifyCandidateCommands(context.Background(), sha, baseSHA, hash([]byte(content+"old")), hash([]byte(content))); err != nil {
 		t.Fatal("second reviewed command source rejected", err)
 	}
-	if err := c.verifyCandidateCommands(context.Background(), sha, hash([]byte(content+"changed"))); err == nil {
+	if err := c.verifyCandidateCommands(context.Background(), sha, baseSHA, hash([]byte(content+"changed"))); err == nil {
 		t.Fatal("candidate command drift accepted")
 	}
-	if err := c.verifyCandidateCommands(context.Background(), "main", hash([]byte(content))); err == nil {
+	if err := c.verifyCandidateCommands(context.Background(), "main", baseSHA, hash([]byte(content))); err == nil {
 		t.Fatal("mutable candidate workflow ref accepted")
+	}
+}
+
+func TestCandidatePinOnlyUpdateRequiresTrustedBaseAndOfficialRelease(t *testing.T) {
+	baseSHA := strings.Repeat("b", 40)
+	candidateSHA := strings.Repeat("a", 40)
+	oldPin := strings.Repeat("c", 40)
+	newPin := "3d3c42e5aac5ba805825da76410c181273ba90b1"
+	base := []byte("name: candidate\n  - uses: actions/checkout@" + oldPin + " # v4.2.2\n    with:\n      persist-credentials: false\n")
+	candidate := []byte(strings.Replace(string(base), oldPin+" # v4.2.2", newPin+" # v7.0.1", 1))
+	for _, scenario := range []struct {
+		name, content, mainSHA, releaseSHA, tagType string
+		wantSuccess                                 bool
+	}{
+		{"pin only", string(candidate), baseSHA, newPin, "commit", true},
+		{"annotated release", string(candidate), baseSHA, newPin, "tag", true},
+		{"untrusted release", string(candidate), baseSHA, oldPin, "commit", false},
+		{"annotated untrusted release", string(candidate), baseSHA, oldPin, "tag", false},
+		{"stale base", string(candidate), strings.Repeat("d", 40), newPin, "commit", false},
+		{"changed command", string(candidate) + "  - run: echo bypass\n", baseSHA, newPin, "commit", false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			c := client{token: "read", base: "https://api.github.test", http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var response any
+				switch r.URL.Path {
+				case "/repos/kevinmartin/sofa/contents/.github/workflows/e2e-fake.yml":
+					content := base
+					if r.URL.Query().Get("ref") == candidateSHA {
+						content = []byte(scenario.content)
+					}
+					response = gitContent{Content: base64.StdEncoding.EncodeToString(content), Encoding: "base64"}
+				case "/repos/kevinmartin/sofa/git/ref/heads/main":
+					response = map[string]any{"object": map[string]string{"sha": scenario.mainSHA}}
+				case "/repos/actions/checkout/releases/tags/v7.0.1":
+					response = map[string]bool{"draft": false, "prerelease": false}
+				case "/repos/actions/checkout/git/ref/tags/v7.0.1":
+					sha := scenario.releaseSHA
+					if scenario.tagType == "tag" {
+						sha = strings.Repeat("e", 40)
+					}
+					response = map[string]any{"object": map[string]string{"type": scenario.tagType, "sha": sha}}
+				case "/repos/actions/checkout/git/tags/" + strings.Repeat("e", 40):
+					if scenario.tagType != "tag" {
+						return nil, fmt.Errorf("unexpected annotated tag lookup")
+					}
+					response = map[string]any{"object": map[string]string{"type": "commit", "sha": scenario.releaseSHA}}
+				default:
+					return nil, fmt.Errorf("unexpected observer request %s", r.URL)
+				}
+				data, _ := json.Marshal(response)
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+			})}}
+			err := c.verifyCandidateCommands(t.Context(), candidateSHA, baseSHA, hash(base))
+			if (err == nil) != scenario.wantSuccess {
+				t.Fatalf("unexpected verification result: %v", err)
+			}
+		})
 	}
 }
 
