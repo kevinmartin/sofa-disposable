@@ -24,9 +24,9 @@ jobs:
       issues: write
       actions: read
       copilot-requests: write
-    uses: kevinmartin/sofa/.github/workflows/discovery.reusable.yml@6fe3680a86dd6626e5ad312b1fb8b12ac8851077
+    uses: kevinmartin/sofa/.github/workflows/discovery.reusable.yml@5cc62356fd022471fabf82f6ea2ff110177185fb
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
-      toolkit_sha: 6fe3680a86dd6626e5ad312b1fb8b12ac8851077
+      toolkit_sha: 5cc62356fd022471fabf82f6ea2ff110177185fb
     secrets:
       SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
