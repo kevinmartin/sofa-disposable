@@ -6,3 +6,9 @@ paths:
   .github/workflows/sofa.yml:
     ignore:
       - 'unknown permission scope "copilot-requests"'
+  .github/workflows/sofa-discovery.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
+  .github/workflows/sofa-review.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
