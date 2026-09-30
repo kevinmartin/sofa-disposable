@@ -1,0 +1,32 @@
+# Project lifecycle canary. A scheduled tick and a manual wake use the same
+# deterministic reconciler; neither authorizes Backlog or Ready on Kevin's behalf.
+name: sofa disposable lifecycle
+
+on:
+  workflow_dispatch:
+    inputs:
+      wake_id:
+        description: Optional stable event identifier for a manual wake
+        required: false
+        type: string
+  schedule:
+    - cron: '17 * * * *' # Hourly disposable economy preset.
+
+permissions: {}
+
+jobs:
+  lifecycle:
+    if: github.event.repository.fork == false && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+      checks: read
+      actions: write
+    uses: kevinmartin/sofa/.github/workflows/lifecycle.reusable.yml@6fe3680a86dd6626e5ad312b1fb8b12ac8851077
+    with:
+      toolkit_sha: 6fe3680a86dd6626e5ad312b1fb8b12ac8851077
+      wake_id: ${{ inputs.wake_id || '' }}
+      delivery_workflow: sofa.yml
+    secrets:
+      SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}

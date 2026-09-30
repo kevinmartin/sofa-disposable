@@ -1,5 +1,5 @@
-# Copy to .github/workflows/sofa.yml in the designated disposable repository.
-# Replace every 000... commit with the same published, reviewed sofa commit.
+# Delivery caller; keep the established reconcile→work sequence. All refs and
+# toolkit_sha values are replaced together with the reviewed milestone 02 SHA.
 name: sofa disposable canary
 
 on:
@@ -22,10 +22,10 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: kevinmartin/sofa/.github/workflows/reconcile.yml@970d0ef331a9490e54405a3a7a8674bec76a4846
+    uses: kevinmartin/sofa/.github/workflows/reconcile.reusable.yml@6fe3680a86dd6626e5ad312b1fb8b12ac8851077
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
-      toolkit_sha: 970d0ef331a9490e54405a3a7a8674bec76a4846
+      toolkit_sha: 6fe3680a86dd6626e5ad312b1fb8b12ac8851077
     secrets:
       SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
 
@@ -36,9 +36,9 @@ jobs:
       contents: write
       copilot-requests: write
       actions: read
-    uses: kevinmartin/sofa/.github/workflows/work.yml@970d0ef331a9490e54405a3a7a8674bec76a4846
+    uses: kevinmartin/sofa/.github/workflows/work.reusable.yml@6fe3680a86dd6626e5ad312b1fb8b12ac8851077
     with:
-      toolkit_sha: 970d0ef331a9490e54405a3a7a8674bec76a4846
+      toolkit_sha: 6fe3680a86dd6626e5ad312b1fb8b12ac8851077
       reconcile_publication: ${{ needs.reconcile.outputs.reconcile_publication == 'true' }}
       reconcile_candidate: ${{ needs.reconcile.outputs.reconcile_candidate == 'true' }}
     secrets:
