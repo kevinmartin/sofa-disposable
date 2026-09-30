@@ -5,24 +5,6 @@ repository_id: R_kgDOUmB_jw
 project_id: PVT_kwHOAAfL7c4Bke1I
 owner_id: MDQ6VXNlcjUxMDk1Nw==
 ready_status: Ready
-lifecycle:
-  statuses:
-    inbox: Inbox
-    discovery: Discovery
-    spec_review: Spec Review
-    backlog: Backlog
-    ready: Ready
-    building: Building
-    verification: Verification
-    review: Review
-    release: Release
-    done: Done
-  poll_minutes: 60 # Disposable economy schedule; manual wakes remain available.
-  discovery_wip: 2
-  delivery_wip: 1
-  spec_author_id: MDM6Qm90NDE4OTgyODI= # github-actions[bot] issue-comment author
-  release:
-    required_checks: [] # Hosted smoke gate is not configured in this canary yet.
 allowed_paths:
   - fixture/greeting.go
 profile:
