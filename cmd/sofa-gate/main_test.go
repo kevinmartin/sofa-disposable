@@ -22,6 +22,13 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestCoordinatorStatusReadsUseExistingActionsCredential(t *testing.T) {
+	w, ok := (api{token: "actions-read-token"}).statusWriter().(gatestatus.Writer)
+	if !ok || w.ReadToken != "actions-read-token" {
+		t.Fatalf("coordinator status reader lost its authenticated read credential: %+v", w)
+	}
+}
+
 func TestHostedScenarioJobShapeIncludesSkippedCallerJobs(t *testing.T) {
 	decode := func(names map[string]string) suiteJobs {
 		t.Helper()

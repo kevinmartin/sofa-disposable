@@ -267,7 +267,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	w := gatestatus.Writer{AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")}
+	w := gatestatus.Writer{AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY"), ReadToken: os.Getenv("GH_TOKEN")}
 	if failurePath != "" {
 		err = runFailures(ctx, data, w)
 	} else {

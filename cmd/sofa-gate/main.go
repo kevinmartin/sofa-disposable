@@ -76,7 +76,7 @@ func (a api) statusWriter() gateStatus {
 	if a.status != nil {
 		return a.status
 	}
-	return gatestatus.Writer{Client: a.http, AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY")}
+	return gatestatus.Writer{Client: a.http, AppID: os.Getenv("SOFA_GATE_APP_ID"), PrivateKeyPEM: os.Getenv("SOFA_GATE_APP_PRIVATE_KEY"), ReadToken: a.token}
 }
 
 func (a api) fixtureWriter() fixtureGate {
