@@ -12,6 +12,6 @@ jobs:
     if: github.event.repository.fork == false && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       contents: read
-    uses: kevinmartin/sofa/.github/workflows/controller-build.reusable.yml@e1d6814a686982804a843573d537028b8af464e6
+    uses: kevinmartin/sofa/.github/workflows/controller-build.reusable.yml@2106afb6e0382a8cacdd7f6edba8a216fec4ab54
     with:
-      toolkit_sha: e1d6814a686982804a843573d537028b8af464e6
+      toolkit_sha: 2106afb6e0382a8cacdd7f6edba8a216fec4ab54
