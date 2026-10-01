@@ -22,7 +22,9 @@ lifecycle:
   delivery_wip: 1
   spec_author_id: MDM6Qm90NDE4OTgyODI= # github-actions[bot] issue-comment author
   release:
-    required_checks: [] # Hosted smoke gate is not configured in this canary yet.
+    required_checks:
+      - name: sofa-post-merge-smoke
+        app_id: 15368 # GitHub Actions
 allowed_paths:
   - fixture/greeting.go
 profile:
