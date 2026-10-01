@@ -34,7 +34,7 @@ limits:
   attempt_seconds: 600
   repair_attempts: 1
   infra_retries: 1
-  max_agent_turns: 1
+  max_agent_turns: 2 # Allow one bounded Discovery revision after the initial draft.
   max_files: 10
   max_file_bytes: 131072
   max_total_bytes: 524288
