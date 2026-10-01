@@ -1,0 +1,25 @@
+# Release evidence for the exact commit pushed to main. Keep this job name
+# unique so unrelated workflows cannot supersede its result on that commit.
+name: sofa post-merge smoke
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    name: sofa-post-merge-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test ./...
