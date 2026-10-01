@@ -246,6 +246,7 @@ jobs:
           name: sofa-e2e-cleaned-${{ github.run_id }}
       - name: Publish App-sourced sofa status for completed results
         env:
+          GH_TOKEN: ${{ github.token }}
           SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
           SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}
@@ -277,6 +278,7 @@ jobs:
           name: sofa-e2e-observed-${{ github.run_id }}
       - name: Publish App-sourced failure for the exact sofa revision
         env:
+          GH_TOKEN: ${{ github.token }}
           SOFA_GATE_APP_ID: ${{ secrets.SOFA_GATE_APP_ID }}
           SOFA_GATE_APP_PRIVATE_KEY: ${{ secrets.SOFA_GATE_APP_PRIVATE_KEY }}
           SOFA_GATE_PR: ${{ inputs.sofa_pr }}

@@ -53,8 +53,8 @@ type Result struct {
 	Description string
 }
 
-// Writer uses a GitHub App installed on sofa. ReadToken is optional for public
-// sofa PRs; if sofa becomes private, supply a separate read-only credential.
+// Writer uses a GitHub App installed on sofa. Supply ReadToken even for public
+// sofa PRs so repeated gate scans do not exhaust the unauthenticated API limit.
 // The App token itself is always restricted to sofa and status publication.
 type Writer struct {
 	Client        *http.Client
