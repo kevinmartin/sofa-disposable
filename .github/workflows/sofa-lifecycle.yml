@@ -16,7 +16,8 @@ permissions: {}
 
 jobs:
   lifecycle:
-    if: github.event.repository.fork == false && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # GitHub schedules only the default branch; the event need not supply its name.
+    if: github.event_name == 'schedule' || (github.event.repository.fork == false && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     permissions:
       contents: write
       issues: read
