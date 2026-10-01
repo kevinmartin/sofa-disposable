@@ -20,10 +20,10 @@ jobs:
       actions: read
       pull-requests: read
       copilot-requests: write
-    uses: kevinmartin/sofa/.github/workflows/review.reusable.yml@2106afb6e0382a8cacdd7f6edba8a216fec4ab54
+    uses: kevinmartin/sofa/.github/workflows/review.reusable.yml@566e6e050a366dc68a9d9bc5e267ce3e3369ddb0
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
-      toolkit_sha: 2106afb6e0382a8cacdd7f6edba8a216fec4ab54
+      toolkit_sha: 566e6e050a366dc68a9d9bc5e267ce3e3369ddb0
     secrets:
       SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
       SOFA_PUBLISH_TOKEN: ${{ secrets.SOFA_PUBLISH_TOKEN }}
