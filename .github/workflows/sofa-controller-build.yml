@@ -1,5 +1,5 @@
-# Secretless controller build for the exact reviewed Sofa revision used by
-# lifecycle polls. Dispatch before the first wake and again before expiry.
+# Legacy source-build wrapper retained during migration. Ordinary v0 callers
+# do not use this artifact and need no controller-build dispatch.
 name: sofa disposable controller build
 
 on:

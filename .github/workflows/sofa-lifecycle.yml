@@ -24,9 +24,8 @@ jobs:
       pull-requests: read
       checks: read
       actions: write
-    uses: kevinmartin/sofa/.github/workflows/lifecycle.reusable.yml@7f056898e56de22ffa0d6118209846358eb70b45
+    uses: kevinmartin/sofa/.github/workflows/lifecycle.reusable.yml@v0
     with:
-      toolkit_sha: 7f056898e56de22ffa0d6118209846358eb70b45
       wake_id: ${{ inputs.wake_id || '' }}
       delivery_workflow: sofa.yml
     secrets:
