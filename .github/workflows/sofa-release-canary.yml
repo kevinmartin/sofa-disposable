@@ -1,0 +1,41 @@
+# Trusted default-branch caller for the post-merge immutable-release canary.
+# This creates no release or channel and has no model/Project/publisher secrets.
+name: sofa disposable immutable release canary
+run-name: Sofa release canary / ${{ inputs.correlation }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Exact immutable release from kevinmartin/sofa
+        type: string
+        required: true
+      source_sha:
+        description: Exact source embedded in the released Sofa binaries
+        type: string
+        required: true
+      correlation:
+        description: Release controller correlation for this source/run/attempt
+        type: string
+        required: true
+      release_run_id:
+        description: Originating Sofa release workflow run ID
+        type: string
+        required: true
+      release_run_attempt:
+        description: Originating Sofa release workflow attempt
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    uses: kevinmartin/sofa/.github/workflows/release-canary.reusable.yml@9cf9276ef0f1ace61da00cec0e46c8893c440ba6
+    with:
+      release_version: ${{ inputs.release_version }}
+      source_sha: ${{ inputs.source_sha }}
+      correlation: ${{ inputs.correlation }}
+      release_run_id: ${{ inputs.release_run_id }}
+      release_run_attempt: ${{ inputs.release_run_attempt }}

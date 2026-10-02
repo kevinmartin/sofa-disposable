@@ -1,0 +1,28 @@
+# Secretless exact-source distribution validation for milestone 02.1.
+# The workflow revision and toolkit_sha stay equal for candidate acceptance.
+name: sofa disposable distribution E2E
+run-name: Sofa distribution E2E / ${{ inputs.toolkit_sha }} / fault=${{ inputs.fail_first_attempt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolkit_sha:
+        description: Full candidate Sofa commit SHA under test
+        required: true
+        type: string
+      fail_first_attempt:
+        description: Inject one first-attempt fault to verify failed-job recovery
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  distribution:
+    uses: kevinmartin/sofa/.github/workflows/distribution-e2e.reusable.yml@9cf9276ef0f1ace61da00cec0e46c8893c440ba6
+    with:
+      toolkit_sha: ${{ inputs.toolkit_sha }}
+      fail_first_attempt: ${{ inputs.fail_first_attempt }}
