@@ -1,5 +1,6 @@
 # Secretless exact-source distribution validation for milestone 02.1.
-# The workflow revision and toolkit_sha stay equal for candidate acceptance.
+# Dispatch with the milestone branch's full SHA and verify GitHub's resolved
+# reusable-workflow SHA matches it. The branch is only for secretless PR tests.
 name: sofa disposable distribution E2E
 run-name: Sofa distribution E2E / ${{ inputs.toolkit_sha }} / fault=${{ inputs.fail_first_attempt }}
 
@@ -22,7 +23,7 @@ permissions:
 
 jobs:
   distribution:
-    uses: kevinmartin/sofa/.github/workflows/distribution-e2e.reusable.yml@9cf9276ef0f1ace61da00cec0e46c8893c440ba6
+    uses: kevinmartin/sofa/.github/workflows/distribution-e2e.reusable.yml@codex/milestone-02.1-distribution
     with:
       toolkit_sha: ${{ inputs.toolkit_sha }}
       fail_first_attempt: ${{ inputs.fail_first_attempt }}
