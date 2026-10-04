@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   canary:
-    uses: kevinmartin/sofa/.github/workflows/release-canary.reusable.yml@9cf9276ef0f1ace61da00cec0e46c8893c440ba6
+    uses: kevinmartin/sofa/.github/workflows/release-canary.reusable.yml@547fcd1b02e1946fe635bc2369e9c42e48e1b862
     with:
       release_version: ${{ inputs.release_version }}
       source_sha: ${{ inputs.source_sha }}
