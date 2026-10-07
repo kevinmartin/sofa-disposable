@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   distribution:
-    uses: kevinmartin/sofa/.github/workflows/distribution-e2e.reusable.yml@codex/milestone-02.1-distribution
+    uses: kevinmartin/sofa/.github/workflows/distribution-e2e.yml@codex/milestone-02.1-distribution
     with:
       toolkit_sha: ${{ inputs.toolkit_sha }}
       fail_first_attempt: ${{ inputs.fail_first_attempt }}
