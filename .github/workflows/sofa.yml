@@ -1,5 +1,5 @@
-# Delivery caller; keep the established reconcile→work sequence. All refs and
-# toolkit_sha values are replaced together with the reviewed milestone 02 SHA.
+# Delivery caller; keep the established reconcile→work sequence. Each CLI job
+# installs the latest compatible promoted v0 release without a source rebuild.
 name: sofa disposable canary
 
 on:
@@ -22,10 +22,9 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: kevinmartin/sofa/.github/workflows/reconcile.reusable.yml@7f056898e56de22ffa0d6118209846358eb70b45
+    uses: kevinmartin/sofa/.github/workflows/reconcile.reusable.yml@v0
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
-      toolkit_sha: 7f056898e56de22ffa0d6118209846358eb70b45
     secrets:
       SOFA_PROJECTS_TOKEN: ${{ secrets.SOFA_PROJECTS_TOKEN }}
 
@@ -36,9 +35,8 @@ jobs:
       contents: write
       copilot-requests: write
       actions: read
-    uses: kevinmartin/sofa/.github/workflows/work.reusable.yml@7f056898e56de22ffa0d6118209846358eb70b45
+    uses: kevinmartin/sofa/.github/workflows/work.reusable.yml@v0
     with:
-      toolkit_sha: 7f056898e56de22ffa0d6118209846358eb70b45
       reconcile_publication: ${{ needs.reconcile.outputs.reconcile_publication == 'true' }}
       reconcile_candidate: ${{ needs.reconcile.outputs.reconcile_candidate == 'true' }}
     secrets:
